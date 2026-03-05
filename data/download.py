@@ -20,6 +20,9 @@ Pretraining data target: ~350GB on disk → ~120B tokens
   - RedPajama arXiv:      1M,  ~15GB (28B-token arXiv slice, math/CS/physics)
   - RedPajama SE:         500K,~3GB  (stackexchange slice as long-form text)
   - lvwerra SE paired:    500K,~5GB  (StackExchange Q&A, Markdown, 26.8M total)
+  - FLAN collection:      500K,~2GB  (diverse NLP tasks + templates, instruction format)
+  - SmolTalk:             300K,~3GB  (multi-turn conversational instruction pairs)
+  - Alpaca:                52K,~50MB (GPT-3.5 general instruction following)
 
 SFT  (~5GB)
 DPO  (~1GB)
@@ -741,7 +744,7 @@ def download_new_pretrain_data():
 
     print("=" * 70)
     print("  NEW PRETRAINING DATA DOWNLOAD")
-    print("  (CodeSearchNet · GitHub Code · ThePile-Books · ThePile-Math · UltraChat)")
+    print("  (CodeSearchNet · GitHub Code · ThePile-Books · ThePile-Math · UltraChat · FLAN · SmolTalk · Alpaca)")
     print("=" * 70)
 
     # ── 1. CodeSearchNet — structured docstring + function (2M, py/java/js) ──
@@ -874,7 +877,7 @@ def download_new_pretrain_data():
     # 200K high-quality multi-turn chat conversations (UltraChat filtered).
     # Fields: prompt (str), messages (list of {role, content}).
     # We flatten the conversation into "Human: …\n\nAssistant: …" prose.
-    print("\n[5/5] UltraChat 200K — HuggingFaceH4/ultrachat_200k (200K)...")
+    print("\n[5/8] UltraChat 200K — HuggingFaceH4/ultrachat_200k (200K)...")
 
     def _se_transform(item):
         messages = item.get("messages") or []
@@ -904,9 +907,113 @@ def download_new_pretrain_data():
         transform_fn=_se_transform,
     )
 
+    # ── 6. FLAN collection — Muennighoff/flan ───────────────────────────────
+    # 15M FLAN examples (templates over NLP tasks).  We pull 500K and format
+    # as "### Instruction:\n{inputs}\n\n### Response:\n{targets}" so the base
+    # model sees instruction structure during pretraining.
+    # Fields: inputs (str), targets (str), task (str)
+    print("\n[6/8] FLAN collection — Muennighoff/flan (500K)...")
+
+    def _flan_transform(item):
+        inp  = (item.get("inputs")  or "").strip()
+        tgt  = (item.get("targets") or "").strip()
+        if not inp or not tgt:
+            return None
+        text = f"### Instruction:\n{inp}\n\n### Response:\n{tgt}"
+        if not text_quality(text, min_len=80):
+            return None
+        if not is_english(text):
+            return None
+        if is_duplicate(text):
+            return None
+        return {"text": text, "__source__": "flan"}
+
+    reset_dedup()
+    stream_and_save(
+        "flan",
+        "Muennighoff/flan",
+        os.path.join(pretrain_dir, "flan"),
+        n_samples=500_000,
+        desc="FLAN collection (500K diverse NLP task templates)",
+        hf_kwargs={"split": "train"},
+        transform_fn=_flan_transform,
+    )
+
+    # ── 7. SmolTalk — HuggingFaceTB/smoltalk ────────────────────────────────
+    # ~20M multi-turn conversational pairs from SmolLM-2 data curation.
+    # Fields: messages (list of {role, content}), source (str).
+    # We flatten into "### Instruction:\n{user}\n\n### Response:\n{assistant}"
+    # for each consecutive user/assistant turn pair.
+    print("\n[7/8] SmolTalk — HuggingFaceTB/smoltalk (300K)...")
+
+    def _smoltalk_transform(item):
+        messages = item.get("messages") or []
+        parts = []
+        for i in range(len(messages) - 1):
+            u = messages[i]
+            a = messages[i + 1]
+            if (u.get("role") or "").lower() == "user" and \
+               (a.get("role") or "").lower() == "assistant":
+                usr = (u.get("content") or "").strip()
+                ast = (a.get("content") or "").strip()
+                if usr and ast:
+                    parts.append(f"### Instruction:\n{usr}\n\n### Response:\n{ast}")
+        if not parts:
+            return None
+        text = "\n\n".join(parts)
+        if not text_quality(text, min_len=100):
+            return None
+        if is_duplicate(text):
+            return None
+        return {"text": text, "__source__": "smoltalk"}
+
+    reset_dedup()
+    stream_and_save(
+        "smoltalk",
+        "HuggingFaceTB/smoltalk",
+        os.path.join(pretrain_dir, "smoltalk"),
+        n_samples=300_000,
+        desc="SmolTalk (300K multi-turn conversational instruction pairs)",
+        hf_kwargs={"split": "train"},
+        transform_fn=_smoltalk_transform,
+    )
+
+    # ── 8. Alpaca — tatsu-lab/alpaca ─────────────────────────────────────────
+    # 52K GPT-3.5 generated instruction-following pairs (full dataset).
+    # Fields: instruction (str), input (str), output (str).
+    # Formatted as "### Instruction:\n{instruction}[\n\n### Input:\n{input}]\n\n### Response:\n{output}".
+    print("\n[8/8] Alpaca — tatsu-lab/alpaca (full, ~52K)...")
+
+    def _alpaca_transform(item):
+        instruction = (item.get("instruction") or "").strip()
+        inp         = (item.get("input")       or "").strip()
+        output      = (item.get("output")      or "").strip()
+        if not instruction or not output:
+            return None
+        if inp:
+            text = f"### Instruction:\n{instruction}\n\n### Input:\n{inp}\n\n### Response:\n{output}"
+        else:
+            text = f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
+        if not text_quality(text, min_len=60):
+            return None
+        if is_duplicate(text):
+            return None
+        return {"text": text, "__source__": "alpaca"}
+
+    reset_dedup()
+    stream_and_save(
+        "alpaca",
+        "tatsu-lab/alpaca",
+        os.path.join(pretrain_dir, "alpaca"),
+        n_samples=52_002,          # full dataset
+        desc="Alpaca (tatsu-lab/alpaca, 52K GPT-3.5 instruction pairs)",
+        hf_kwargs={"split": "train"},
+        transform_fn=_alpaca_transform,
+    )
+
     # ── Summary ──────────────────────────────────────────────────────────────
     new_sources = ["code_search_net", "code_github", "redpajama_books",
-                   "arxiv_math", "stackexchange"]
+                   "arxiv_math", "stackexchange", "flan", "smoltalk", "alpaca"]
     print("\n" + "─" * 70)
     print("  NEW PRETRAIN DATA SUMMARY:")
     for d in new_sources:
@@ -928,7 +1035,7 @@ def download_new_pretrain_data():
     print("  Next step — append-tokenize new sources:")
     print("    conda run -n deepfill python data/dataset.py \\")
     print("      --stage append \\")
-    print("      --sources code_search_net,code_github,redpajama_books,arxiv_math,stackexchange")
+    print("      --sources code_search_net,code_github,redpajama_books,arxiv_math,stackexchange,flan,smoltalk,alpaca")
     print()
 
 
