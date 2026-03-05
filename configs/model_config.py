@@ -1,20 +1,18 @@
 """
-Dense 3B Reasoning Model Configuration.
+Hybrid 3B Reasoning Model Configuration.
 
-Architecture: MLA + Dense SwiGLU FFN + RMSNorm + RoPE + MTP
-Total Parameters: ~3.0B (all activated per token — no MoE)
+Architecture: GDN/MLA Hybrid + Dense SwiGLU FFN + RMSNorm + RoPE + MTP
+  - 3:1 ratio of Gated DeltaNet (linear O(n)) to MLA (quadratic O(n²))
+  - 20 GDN layers + 6 MLA layers = 26 total
+  - ~3.7B total parameters (all activated per token — no MoE)
+
 Target hardware: 2× NVIDIA L40S (2× 48 GB) via FSDP ZeRO-2
-
-Design rationale (3B scale on 2× L40S):
-  - hidden 1536→3072, layers 24→26, heads 16→24 (d_head 96→128)
-  - FFN intermediate 6144→8192 (≈2.67× hidden; SwiGLU ≈4× effective)
-  - Keeps all 1B design choices: dense, MLA, MTP, RoPE-500k, cl100k
-  - VRAM budget: ~34 GB/GPU with FSDP ZeRO-2 + activation checkpointing
-    (weights 3GB + grads 6GB + Adam 12GB + activations ~12GB = ~33GB)
-  - Both GPUs run at full utilisation; no ZeRO-3 / offload needed
+  - VRAM budget: ~22 GB/GPU with FSDP ZeRO-2 + activation checkpointing
+    (weights 3.7GB + grads 7.4GB + Adam 14.8GB + activations ~14GB) / 2 GPUs
+  - Fits comfortably in 48 GB per GPU
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 
 
 @dataclass
@@ -24,11 +22,27 @@ class NovaMind3BConfig:
 
     # --- Transformer core ---
     hidden_dim: int = 3072            # 2× the 1B hidden (1536→3072)
-    num_layers: int = 26              # 1B had 24; 26 × 104M ≈ 3.0B total
+    num_layers: int = 26              # 20 GDN + 6 MLA = 26 total
     max_seq_len: int = 8192
     dropout: float = 0.0
 
-    # --- Multi-head Latent Attention (MLA) ---
+    # --- Hybrid Architecture ---
+    # 3:1 ratio: every 4th layer uses MLA (full attention), rest use GDN
+    use_hybrid: bool = True
+    hybrid_attention_layers: List[int] = field(
+        default_factory=lambda: [3, 7, 11, 15, 19, 23]   # 6 MLA layers
+    )
+
+    # --- Gated DeltaNet config (for non-MLA layers in hybrid) ---
+    # Matches fla reference: key_dim = 0.75d, value_dim = 1.5d → 6d² params
+    gdn_num_heads: int = 9            # H (keys/queries)
+    gdn_head_dim: int = 256           # D_k per head (key_dim = 9×256 = 2304)
+    gdn_expand_v: float = 2.0         # D_v = D_k × 2 = 512 (value_dim = 4608)
+    gdn_use_gate: bool = True         # Output sigmoid gate + gated RMSNorm
+    gdn_use_short_conv: bool = True   # Causal depthwise conv on Q, K, V
+    gdn_conv_size: int = 4            # Conv kernel size
+
+    # --- Multi-head Latent Attention (MLA) — for attention layers ---
     n_heads: int = 24                 # 16→24; d_head=128 (24×128=3072)
     d_head: int = 128                 # 96→128
     d_kv_comp: int = 768              # hidden/4  (384→768)
@@ -89,12 +103,44 @@ class NovaMind3BConfig:
             (d_h * n_h) * d              # W_O
         )
 
+        # GDN per layer (if hybrid)
+        gdn_params = 0
+        if self.use_hybrid:
+            gdn_key_dim = self.gdn_num_heads * self.gdn_head_dim
+            gdn_head_v = int(self.gdn_head_dim * self.gdn_expand_v)
+            gdn_value_dim = self.gdn_num_heads * gdn_head_v
+            gdn_params = (
+                d * gdn_key_dim +           # q_proj
+                d * gdn_key_dim +           # k_proj
+                d * gdn_value_dim +         # v_proj
+                d * self.gdn_num_heads +    # b_proj
+                d * self.gdn_num_heads +    # a_proj
+                self.gdn_num_heads +        # A_log
+                self.gdn_num_heads +        # dt_bias
+                gdn_value_dim * d           # o_proj
+            )
+            if self.gdn_use_gate:
+                gdn_params += d * gdn_value_dim  # g_proj
+                gdn_params += gdn_head_v         # o_norm_weight
+            else:
+                gdn_params += gdn_head_v         # o_norm
+            if self.gdn_use_short_conv:
+                gdn_params += (gdn_key_dim + gdn_key_dim + gdn_value_dim) * self.gdn_conv_size
+
         # Dense FFN (SwiGLU): gate + up + down
         dense_ffn_params = d * self.dense_intermediate * 3
 
-        # All layers are dense
-        layer_params = mla_params + dense_ffn_params
-        total_layers = layer_params * self.num_layers
+        # Count layers by type
+        if self.use_hybrid:
+            n_mla = len(self.hybrid_attention_layers)
+            n_gdn = self.num_layers - n_mla
+        else:
+            n_mla = self.num_layers
+            n_gdn = 0
+
+        mla_layer_total = mla_params + dense_ffn_params
+        gdn_layer_total = gdn_params + dense_ffn_params
+        total_layers = n_mla * mla_layer_total + n_gdn * gdn_layer_total
 
         # MoE layers (0 if fully dense)
         moe_ffn_params = 0
@@ -104,7 +150,6 @@ class NovaMind3BConfig:
             single_expert_params = d * self.expert_intermediate * 3
             router_params = d * self.n_routed_experts
             moe_ffn_params = shared_expert_params + single_expert_params * self.n_routed_experts + router_params
-            # Subtract dense FFN, add MoE FFN for MoE layers
             total_moe = self.num_moe_layers * (moe_ffn_params - dense_ffn_params)
 
         # RMSNorm (2 per layer + 1 final)
@@ -113,7 +158,7 @@ class NovaMind3BConfig:
         # Embedding
         embedding_params = self.vocab_size * d
 
-        # MTP module
+        # MTP module (always uses MLA)
         mtp_params = 0
         if self.mtp_depth > 0:
             mtp_projection = 2 * d * d
@@ -125,13 +170,15 @@ class NovaMind3BConfig:
 
         return {
             "embedding": embedding_params,
-            "transformer_layers": total_layers,
+            "mla_layers (×{})".format(n_mla): n_mla * mla_layer_total,
+            "gdn_layers (×{})".format(n_gdn): n_gdn * gdn_layer_total,
             "moe_extra (0 if dense)": total_moe,
             "rmsnorm": rmsnorm_params,
             "mtp": mtp_params,
             "total": total,
             "total_B": total / 1e9,
-            "mla_per_layer": mla_params,
+            "mla_per_layer": mla_layer_total,
+            "gdn_per_layer": gdn_layer_total if n_gdn > 0 else 0,
             "ffn_per_layer": dense_ffn_params,
         }
 
@@ -140,7 +187,9 @@ if __name__ == "__main__":
     config = NovaMind3BConfig()
     counts = config.count_parameters()
     print("=" * 60)
-    print("NovaMind-3B Parameter Count")
+    print("NovaMind-3B Hybrid Parameter Count")
+    print(f"  Architecture: {config.num_layers - len(config.hybrid_attention_layers)} GDN + "
+          f"{len(config.hybrid_attention_layers)} MLA layers (3:1 ratio)")
     print("=" * 60)
     for k, v in counts.items():
         if isinstance(v, float):

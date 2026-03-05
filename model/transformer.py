@@ -1,11 +1,18 @@
 """
-Full NovaMind inspired Transformer model at 1B scale.
+Hybrid NovaMind Transformer model.
 
 Components:
   - Token Embedding (shared with output head)
-  - N Transformer Layers (MLA + FFN/MoE)
-  - Multi-Token Prediction module
+  - N Transformer Layers:
+      • Gated DeltaNet (linear O(n)) for majority of layers (3:1 ratio)
+      • Multi-head Latent Attention (MLA, O(n²)) every 4th layer
+  - Dense SwiGLU FFN on all layers
+  - Multi-Token Prediction module (MLA-based)
   - RMSNorm throughout
+
+The 3:1 GDN/MLA hybrid ratio achieves massive inference speedups at long
+context lengths while retaining strong retrieval quality via periodic
+full-attention layers.
 """
 import torch
 import torch.nn as nn
@@ -61,16 +68,38 @@ def chunked_cross_entropy(
 
 
 class TransformerBlock(nn.Module):
-    """Single transformer block: RMSNorm -> MLA -> residual -> RMSNorm -> FFN/MoE -> residual."""
+    """Single transformer block with hybrid attention support.
 
-    def __init__(self, config, layer_idx: int):
+    Attention type per layer is determined by config:
+      - MLA (Multi-head Latent Attention) for layers in hybrid_attention_layers
+      - GDN (Gated DeltaNet) for all other layers
+      - force_attn_type overrides automatic selection (used by MTP module)
+
+    Structure: RMSNorm -> Attention -> residual -> RMSNorm -> FFN/MoE -> residual
+    """
+
+    def __init__(self, config, layer_idx: int, force_attn_type: str = None):
         super().__init__()
         self.layer_idx = layer_idx
 
         # Pre-attention norm
         self.attn_norm = RMSNorm(config.hidden_dim, eps=config.rms_norm_eps)
-        # Multi-head Latent Attention
-        self.attention = MultiHeadLatentAttention(config)
+
+        # Determine attention type for this layer
+        if force_attn_type is not None:
+            self.attn_type = force_attn_type
+        elif (getattr(config, 'use_hybrid', False)
+              and getattr(config, 'hybrid_attention_layers', None)):
+            self.attn_type = 'mla' if layer_idx in config.hybrid_attention_layers else 'gdn'
+        else:
+            self.attn_type = 'mla'
+
+        # Attention module
+        if self.attn_type == 'gdn':
+            from model.gated_delta_net import GatedDeltaNet
+            self.attention = GatedDeltaNet(config, layer_idx=layer_idx)
+        else:
+            self.attention = MultiHeadLatentAttention(config)
 
         # Pre-FFN norm
         self.ffn_norm = RMSNorm(config.hidden_dim, eps=config.rms_norm_eps)
@@ -119,8 +148,8 @@ class MTPModule(nn.Module):
         self.emb_norm = RMSNorm(d, eps=config.rms_norm_eps)
         self.projection = nn.Linear(2 * d, d, bias=False)
 
-        # Lightweight transformer block for MTP
-        self.block = TransformerBlock(config, layer_idx=0)  # Use dense FFN
+        # Lightweight transformer block for MTP (always MLA for quality)
+        self.block = TransformerBlock(config, layer_idx=0, force_attn_type='mla')
 
         self.final_norm = RMSNorm(d, eps=config.rms_norm_eps)
 
@@ -152,15 +181,25 @@ class MTPModule(nn.Module):
 
 class NovaMind3B(nn.Module):
     """
-    Dense 1B Reasoning Model.
+    Hybrid 3B Reasoning Model.
 
     Architecture:
     - Token Embedding (tied with output head)
-    - 24 Transformer layers: MLA + Dense SwiGLU FFN (d_ff=6144)
+    - 26 Transformer layers:
+        • 20 GDN layers (Gated DeltaNet — linear O(n) attention)
+        • 6 MLA layers (Multi-head Latent Attention — full O(n²) attention)
+        • 3:1 GDN:MLA ratio — MLA at layers 3, 7, 11, 15, 19, 23
+    - Dense SwiGLU FFN on all layers (d_ff=8192)
     - RMSNorm final layer
-    - Multi-Token Prediction module (MTP depth=1, λ=0.3)
+    - Multi-Token Prediction module (MTP depth=1, λ=0.3, MLA-based)
 
-    ~1.09B total parameters, all activated per token.
+    ~3.7B total parameters, all activated per token.
+
+    Key advantages over pure-MLA architecture:
+    - 75% of layers have O(1) inference memory (fixed-size state, no KV cache)
+    - Massive decoding throughput improvement at long context lengths
+    - Better length extrapolation from the Gated DeltaNet layers
+    - Full-attention MLA layers every 4th provide strong retrieval quality
     """
 
     def __init__(self, config):
@@ -192,9 +231,13 @@ class NovaMind3B(nn.Module):
         self.apply(self._init_weights)
 
         # Apply special scaled init to output projections (like GPT-2)
+        # Handles both MLA (W_O) and GDN (o_proj) output projections
         for layer in self.layers:
             if hasattr(layer.attention, 'W_O'):
                 nn.init.normal_(layer.attention.W_O.weight,
+                              std=config.init_std / (2 * config.num_layers) ** 0.5)
+            elif hasattr(layer.attention, 'o_proj'):
+                nn.init.normal_(layer.attention.o_proj.weight,
                               std=config.init_std / (2 * config.num_layers) ** 0.5)
 
     def _init_weights(self, module):
