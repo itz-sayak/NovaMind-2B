@@ -773,6 +773,10 @@ _SOURCE_FIELD = {
     "code_github":     "content",   # raw code saved to `content`
     "arxiv_math":      "text",
     "stackexchange":   "text",
+    # Instruction sources (pretrain-formatted)
+    "flan":            "text",
+    "smoltalk":        "text",
+    "alpaca":          "text",
 }
 
 
