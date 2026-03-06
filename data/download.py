@@ -922,8 +922,8 @@ def download_new_pretrain_data():
         text = f"### Instruction:\n{inp}\n\n### Response:\n{tgt}"
         if not text_quality(text, min_len=80):
             return None
-        if not is_english(text):
-            return None
+        # Skip is_english — FLAN is English-only by construction; the template
+        # structure (short imperatives + named entities) causes false rejections.
         if is_duplicate(text):
             return None
         return {"text": text, "__source__": "flan"}
