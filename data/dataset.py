@@ -906,9 +906,6 @@ def append_new_sources(
     print(f"\nDone!")
     print(f"  train.bin: {final_train:,} tokens  ({final_train*4/1e9:.1f} GB)")
     print(f"  val.bin:   {final_val:,} tokens  ({final_val*4/1e9:.1f} GB)")
-    print(f"\nDone!")
-    print(f"  train.bin: {len(final_train):,} tokens  ({len(final_train)*4/1e9:.1f} GB)")
-    print(f"  val.bin:   {len(final_val):,} tokens  ({len(final_val)*4/1e9:.1f} GB)")
 
 
 if __name__ == "__main__":
