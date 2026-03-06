@@ -788,17 +788,22 @@ def append_new_sources(
     val_fraction: float = 0.005,
 ):
     """
-    Tokenize a list of new sources and APPEND their tokens to existing
-    train.bin and val.bin — no re-processing of already-tokenized data.
+    Tokenize a list of new sources and APPEND their tokens directly to
+    train.bin and val.bin — no tmp file, no double disk usage.
+
+    Uses a val_counter to route every ~1/val_fraction-th flush to val.bin
+    and the rest to train.bin.  This avoids accumulating a full tmp file
+    before splitting (which would require 2× the token storage on disk).
 
     Args:
         sources_csv: comma-separated source names, e.g. 'c4_en,redpajama_books'
         data_dir:    directory containing the raw HF Arrow datasets
         output_dir:  directory containing (and where we update) train.bin / val.bin
         flush_every: token buffer size before flushing to disk
-        val_fraction: fraction of new tokens to add to val split (default 0.5%)
+        val_fraction: fraction of new tokens to route to val split (default 0.5%)
     """
     from datasets import load_from_disk
+    import shutil as _shutil
 
     source_names = [s.strip() for s in sources_csv.split(",") if s.strip()]
     if not source_names:
@@ -808,96 +813,99 @@ def append_new_sources(
     tokenizer = get_tokenizer()
     train_path = os.path.join(output_dir, "train.bin")
     val_path   = os.path.join(output_dir, "val.bin")
-    tmp_path   = os.path.join(output_dir, "_new_tokens_tmp.bin")
 
     if not os.path.exists(train_path):
         raise FileNotFoundError(
             f"{train_path} not found. Run full tokenize first."
         )
 
-    existing_train = np.memmap(train_path, dtype=np.uint32, mode="r")
-    existing_val   = np.memmap(val_path,   dtype=np.uint32, mode="r")
-    print(f"Existing train: {len(existing_train):,} tokens")
-    print(f"Existing val:   {len(existing_val):,} tokens")
+    train_tokens_before = os.path.getsize(train_path) // 4
+    val_tokens_before   = os.path.getsize(val_path) // 4 if os.path.exists(val_path) else 0
+    print(f"Existing train: {train_tokens_before:,} tokens  ({train_tokens_before*4/1e9:.1f} GB)")
+    print(f"Existing val:   {val_tokens_before:,} tokens")
     print(f"Appending sources: {source_names}\n")
 
-    total_new = 0
+    total_new_train = 0
+    total_new_val   = 0
 
-    with open(tmp_path, "wb") as tmp_f:
-        token_buf: list[int] = []
+    # Val routing: send every N-th flush to val, rest to train.
+    val_every   = max(1, round(1.0 / val_fraction))   # e.g. 200 for 0.5%
+    flush_count = 0
 
-        def _flush():
-            nonlocal total_new
-            if not token_buf:
-                return
-            arr = np.array(token_buf, dtype=np.uint32)
-            arr.tofile(tmp_f)
-            total_new += len(token_buf)
-            token_buf.clear()
+    token_buf: list[int] = []
 
-        for source_name in source_names:
-            source_path = os.path.join(data_dir, source_name)
-            if not os.path.exists(source_path):
-                print(f"SKIP {source_name}: not found at {source_path}")
+    def _flush():
+        nonlocal total_new_train, total_new_val, flush_count
+        if not token_buf:
+            return
+        arr = np.array(token_buf, dtype=np.uint32)
+        flush_count += 1
+        if flush_count % val_every == 0:
+            with open(val_path, "ab") as f:
+                arr.tofile(f)
+            total_new_val += len(token_buf)
+        else:
+            with open(train_path, "ab") as f:
+                arr.tofile(f)
+            total_new_train += len(token_buf)
+        token_buf.clear()
+
+        # Disk-space guard — abort early rather than fill the drive
+        free_gb = _shutil.disk_usage(output_dir).free / (1024 ** 3)
+        if free_gb < 20:
+            raise OSError(
+                f"Disk nearly full ({free_gb:.1f} GB free) — aborting to protect data. "
+                "Free space and re-run; already-appended tokens are safely in train.bin."
+            )
+
+    for source_name in source_names:
+        source_path = os.path.join(data_dir, source_name)
+        if not os.path.exists(source_path):
+            print(f"SKIP {source_name}: not found at {source_path}")
+            continue
+
+        text_field = _SOURCE_FIELD.get(source_name, "text")
+        print(f"Tokenizing {source_name} (field={text_field})...")
+        ds = load_from_disk(source_path)
+        source_count = 0
+
+        for i, item in enumerate(ds):
+            text = item.get(text_field, "")
+            if not text:
+                for alt in ["text", "content", "query", "instruction"]:
+                    text = item.get(alt, "")
+                    if text:
+                        break
+            if not text:
                 continue
 
-            text_field = _SOURCE_FIELD.get(source_name, "text")
-            print(f"Tokenizing {source_name} (field={text_field})...")
-            ds = load_from_disk(source_path)
-            source_count = 0
+            toks = tokenizer.encode_ordinary(text)
+            toks.append(tokenizer.eos_token_id)
+            token_buf.extend(toks)
+            source_count += len(toks)
 
-            for i, item in enumerate(ds):
-                text = item.get(text_field, "")
-                if not text:
-                    for alt in ["text", "content", "query", "instruction"]:
-                        text = item.get(alt, "")
-                        if text:
-                            break
-                if not text:
-                    continue
+            if len(token_buf) >= flush_every:
+                _flush()
 
-                toks = tokenizer.encode_ordinary(text)
-                toks.append(tokenizer.eos_token_id)
-                token_buf.extend(toks)
-                source_count += len(toks)
+            if (i + 1) % 200_000 == 0:
+                free_gb = _shutil.disk_usage(output_dir).free / (1024 ** 3)
+                print(f"  {source_name}: {i+1} docs, {source_count:,} tokens  (disk free: {free_gb:.0f} GB)")
 
-                if len(token_buf) >= flush_every:
-                    _flush()
+        _flush()
+        print(f"  {source_name}: {source_count:,} tokens total")
 
-                if (i + 1) % 200_000 == 0:
-                    print(f"  {source_name}: {i+1} docs, {source_count:,} tokens")
-
-            _flush()
-            print(f"  {source_name}: {source_count:,} tokens total")
-
-    print(f"\nNew tokens collected: {total_new:,}")
+    total_new = total_new_train + total_new_val
+    print(f"\nNew tokens appended: {total_new:,}  (train: {total_new_train:,}  val: {total_new_val:,})")
     if total_new == 0:
-        print("Nothing to append.")
-        os.remove(tmp_path)
+        print("Nothing was appended.")
         return
 
-    # ── Split new tokens into train (99.5%) and val (0.5%) ───────────────────
-    new_data  = np.memmap(tmp_path, dtype=np.uint32, mode="r")
-    new_val_size   = max(1000, int(total_new * val_fraction))
-    new_train_size = total_new - new_val_size
-
-    print(f"Appending {new_train_size:,} tokens to train.bin ...")
-    _CHUNK = 50_000_000
-    with open(train_path, "ab") as f:
-        for start in range(0, new_train_size, _CHUNK):
-            end = min(start + _CHUNK, new_train_size)
-            np.array(new_data[start:end]).tofile(f)
-
-    print(f"Appending {new_val_size:,} tokens to val.bin ...")
-    with open(val_path, "ab") as f:
-        np.array(new_data[new_train_size:]).tofile(f)
-
-    del new_data, existing_train, existing_val
-    os.remove(tmp_path)
-
     # Report final sizes
-    final_train = np.memmap(train_path, dtype=np.uint32, mode="r")
-    final_val   = np.memmap(val_path,   dtype=np.uint32, mode="r")
+    final_train = os.path.getsize(train_path) // 4
+    final_val   = os.path.getsize(val_path) // 4 if os.path.exists(val_path) else 0
+    print(f"\nDone!")
+    print(f"  train.bin: {final_train:,} tokens  ({final_train*4/1e9:.1f} GB)")
+    print(f"  val.bin:   {final_val:,} tokens  ({final_val*4/1e9:.1f} GB)")
     print(f"\nDone!")
     print(f"  train.bin: {len(final_train):,} tokens  ({len(final_train)*4/1e9:.1f} GB)")
     print(f"  val.bin:   {len(final_val):,} tokens  ({len(final_val)*4/1e9:.1f} GB)")
