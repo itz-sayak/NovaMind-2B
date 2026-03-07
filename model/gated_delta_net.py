@@ -72,27 +72,23 @@ try:
     # `.to(b_k.dtype)` after tl.trans() forces encoding re-derivation.
     try:
         import fla.ops.gated_delta_rule.wy_fast as _wy_mod
-        import inspect as _inspect
-        _src = _inspect.getsource(_wy_mod.prepare_wy_repr_bwd_kernel.fn)
-        if 'b_ktb = b_kt * b_b[None, :]' in _src and 'b_kt.to(b_k.dtype)' not in _src:
-            import pathlib as _pathlib
-            _wy_path = _pathlib.Path(_wy_mod.__file__)
-            _orig = _wy_path.read_text()
+        import pathlib as _pathlib
+        _wy_path = _pathlib.Path(_wy_mod.__file__)
+        _orig = _wy_path.read_text()
+        if 'b_ktb = b_kt * b_b[None, :]' in _orig and 'b_kt.to(b_k.dtype)' not in _orig:
             _patched = _orig.replace(
                 'b_ktb = b_kt * b_b[None, :]',
                 'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]',
             )
-            if _patched != _orig:
-                _wy_path.write_text(_patched)
-                # Force triton to recompile by clearing the cached kernel
-                import importlib
-                importlib.reload(_wy_mod)
-                # Re-import to pick up the patched kernel
-                importlib.reload(_sys.modules['fla.ops.gated_delta_rule.chunk'])
-                from fla.ops.gated_delta_rule import (
-                    chunk_gated_delta_rule,
-                    fused_recurrent_gated_delta_rule,
-                )
+            _wy_path.write_text(_patched)
+            import importlib as _il
+            _il.reload(_wy_mod)
+            if 'fla.ops.gated_delta_rule.chunk' in _sys.modules:
+                _il.reload(_sys.modules['fla.ops.gated_delta_rule.chunk'])
+            from fla.ops.gated_delta_rule import (
+                chunk_gated_delta_rule,
+                fused_recurrent_gated_delta_rule,
+            )
     except Exception:
         pass  # Non-critical; warmup_fla_kernels will detect if it still fails
     _FLA_AVAILABLE = True
