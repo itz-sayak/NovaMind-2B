@@ -313,6 +313,10 @@ def train(args):
         train_config.compile = False
     if args.no_fla:
         os.environ["FLA_DISABLE"] = "1"
+    if args.data_dir:
+        train_config.data_dir = args.data_dir
+    if args.output_dir:
+        train_config.output_dir = args.output_dir
     if args.smoke_test:
         # Tiny model (~50M params) for local validation — does not fit the 3B config on 24 GB
         model_config.hidden_dim = 512
@@ -733,6 +737,10 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-test", action="store_true",
                         help="Shrink model to tiny size for local smoke testing")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--data-dir", type=str, default=None,
+                        help="Override PretrainConfig.data_dir (path containing train.bin/val.bin)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Override PretrainConfig.output_dir (checkpoint save path)")
     # W&B
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb-project", type=str, default="novamind-3b-pretrain")
