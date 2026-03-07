@@ -7,9 +7,10 @@ triton==3.2.0
 # ── Attention kernels ─────────────────────────────────────────────────────
 # Install these *after* torch:
 #   pip install flash-attn --no-build-isolation
-#   pip install flash-linear-attention
+#   pip install git+https://github.com/fla-org/flash-linear-attention.git
 flash-attn==2.7.2.post1
-flash-linear-attention==0.4.2
+# flash-linear-attention must be installed from source (PyPI 0.4.1 is missing fla.ops):
+#   pip install git+https://github.com/fla-org/flash-linear-attention.git
 einops==0.8.2
 
 # ── Data / tokenization ───────────────────────────────────────────────────
