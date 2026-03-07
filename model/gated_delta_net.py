@@ -39,15 +39,17 @@ import torch.nn.functional as F
 # Set FLA_DISABLE=1 to force the pure-PyTorch fallback (e.g. for smoke tests
 # on hardware where Triton JIT compilation is unavailable or slow).
 import os as _os
+import sys as _sys_outer
 try:
     if _os.environ.get("FLA_DISABLE", "0") == "1":
         raise ImportError("FLA_DISABLE=1")
     # fla/__init__.py imports fla.layers and fla.models, which drag in
     # transformers → torchvision → bz2 → _bz2 (absent in some pyenv builds
-    # compiled without libbz2 headers).  fla/ops/__init__.py imports every
-    # ops submodule (abc, linear_attn, …) which we don't need.
-    # Pre-stub both packages in sys.modules so their __init__.py files are
-    # skipped entirely; subpackage lookups still work via __path__.
+    # compiled without libbz2 headers).
+    # fla/ops/__init__.py imports every ops submodule which we don't need.
+    # fla/modules/__init__.py imports ALL modules (conv, rotary, etc.).
+    # Pre-stub all three packages in sys.modules so their __init__.py files
+    # are skipped entirely; subpackage lookups still work via __path__.
     import sys as _sys, types as _types, importlib.util as _ilu
     import pathlib as _pathlib
     _fla_spec = _ilu.find_spec('fla')
@@ -67,27 +69,34 @@ try:
     # tl.trans() changes the MLIR block encoding; element-wise arith.mulf
     # then fails with "requires the same encoding" in Triton 3.2.0.
     # Fix: multiply BEFORE transpose → same math, compatible encoding.
-    # This matches the pattern already used elsewhere in the same kernel
-    # (lines ~182, ~196): multiply in standard encoding, then transpose.
     _wy_file = _pathlib.Path(_fla_root) / 'ops' / 'gated_delta_rule' / 'wy_fast.py'
     _FIXED_LINE = 'b_ktb = tl.trans(b_k * b_b[:, None])'
     try:
         if _wy_file.exists():
             _wy_src = _wy_file.read_text()
             _needs_patch = False
-            # Handle both the original buggy line and our previous wrong fix
             for _old in ('b_ktb = b_kt * b_b[None, :]',
                          'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]'):
                 if _old in _wy_src:
                     _wy_src = _wy_src.replace(_old, _FIXED_LINE)
                     _needs_patch = True
-            if _needs_patch and _FIXED_LINE in _wy_src:
+            if _needs_patch:
                 _wy_file.write_text(_wy_src)
-                print(f"  [auto-patch] Fixed Triton encoding bug in {_wy_file}")
-    except OSError as _e:
-        print(f"  [auto-patch] Could not patch {_wy_file}: {_e}")
-    # ── Stub fla and fla.ops to skip heavy __init__.py imports ───────────
-    for _pkg_name, _rel in (('fla', ''), ('fla.ops', 'ops')):
+                print(f"  [auto-patch] Fixed Triton encoding bug in {_wy_file}",
+                      file=_sys_outer.stderr, flush=True)
+            else:
+                print(f"  [auto-patch] wy_fast.py already patched or not found",
+                      file=_sys_outer.stderr, flush=True)
+        else:
+            print(f"  [auto-patch] WARNING: {_wy_file} not found",
+                  file=_sys_outer.stderr, flush=True)
+    except Exception as _patch_err:
+        print(f"  [auto-patch] FAILED: {type(_patch_err).__name__}: {_patch_err}",
+              file=_sys_outer.stderr, flush=True)
+    # ── Stub fla, fla.ops, fla.modules to skip heavy __init__.py imports ─
+    # fla.modules.__init__ imports ALL modules (conv/cuda, rotary, layernorm…)
+    # which may fail with ImportError on envs missing causal_conv1d etc.
+    for _pkg_name, _rel in (('fla', ''), ('fla.ops', 'ops'), ('fla.modules', 'modules')):
         if _pkg_name not in _sys.modules:
             _m = _types.ModuleType(_pkg_name)
             _m.__path__ = [_osp.join(_fla_root, _rel) if _rel else _fla_root]
@@ -99,9 +108,10 @@ try:
         fused_recurrent_gated_delta_rule,
     )
     _FLA_AVAILABLE = True
-except (ImportError, RuntimeError):
-    # ImportError  → fla not installed, _bz2 missing, FLA_DISABLE=1, etc.
-    # RuntimeError → triton.autotune fires on a CPU-only node (no CUDA driver)
+except Exception as _fla_err:
+    # Print to stderr (always visible, unbuffered) so we can diagnose failures
+    print(f"  [FLA] import failed: {type(_fla_err).__name__}: {_fla_err}",
+          file=_sys_outer.stderr, flush=True)
     _FLA_AVAILABLE = False
     chunk_gated_delta_rule = None
     fused_recurrent_gated_delta_rule = None
@@ -166,7 +176,8 @@ def warmup_fla_kernels(device: torch.device = None, verbose: bool = True):
             return _fla_mode
         except Exception as e:
             if verbose:
-                print(f"  FLA probe '{mode}' failed: {type(e).__name__}: {e}")
+                print(f"  FLA probe '{mode}' failed: {type(e).__name__}: {e}",
+                      file=_sys_outer.stderr, flush=True)
             continue
 
     _fla_mode = "off"
