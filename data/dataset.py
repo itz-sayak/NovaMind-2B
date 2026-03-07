@@ -159,6 +159,18 @@ class StreamingPretrainDataset(IterableDataset):
         self._bin_file = bin_file
         # Open mmap just to report size; workers re-open independently to
         # avoid sharing mmap file descriptors across fork boundaries.
+        # Truncate to the nearest uint32 boundary in case of a partial transfer.
+        raw_bytes = os.path.getsize(bin_file)
+        remainder = raw_bytes % 4
+        if remainder:
+            import warnings
+            warnings.warn(
+                f"{bin_file}: file size {raw_bytes} is not a multiple of 4 bytes "
+                f"(uint32). Truncating {remainder} trailing byte(s). "
+                "Re-transfer the file for a clean copy."
+            )
+            with open(bin_file, 'r+b') as _f:
+                _f.truncate(raw_bytes - remainder)
         _tmp = np.memmap(bin_file, dtype=np.uint32, mode='r')
         self._num_tokens = len(_tmp)
         del _tmp
