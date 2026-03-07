@@ -54,6 +54,7 @@ del _pre, _pre_args
 from configs.model_config import NovaMind3BConfig
 from configs.train_config import PretrainConfig
 from model.transformer import NovaMind3B
+from model.gated_delta_net import warmup_fla_kernels
 from data.dataset import PretrainDataset, StreamingPretrainDataset
 from optim.muon import create_optimizer
 
@@ -390,6 +391,15 @@ def train(args):
                 print(f"  {k}: {v:.6f}")
 
     model = model.to(device=device, dtype=torch.bfloat16)
+
+    # Probe FLA Triton kernels (forward + backward) with a tiny tensor.
+    # Falls through: chunk → recurrent → pure-PyTorch fallback.
+    fla_mode = warmup_fla_kernels(device)
+    if main:
+        mode_labels = {"chunk": "FLA chunk-parallel (fastest)",
+                       "recurrent": "FLA fused-recurrent (chunk backward broken)",
+                       "off": "pure-PyTorch recurrent (FLA unavailable)"}
+        print(f"  GDN kernel: {mode_labels.get(fla_mode, fla_mode)}")
 
     # Compile before DDP wrap (torch.compile + DDP is supported in PyTorch 2.x)
     # torch.compile's inductor backend requires networkx (which in turn imports bz2).

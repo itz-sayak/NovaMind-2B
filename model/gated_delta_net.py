@@ -74,6 +74,56 @@ except (ImportError, RuntimeError):
     fused_recurrent_gated_delta_rule = None
 
 
+# ── FLA kernel mode ────────────────────────────────────────────────────────
+# "chunk"     → chunk_gated_delta_rule (fastest, chunk-parallel forward+backward)
+# "recurrent" → fused_recurrent_gated_delta_rule (uses different backward path)
+# "off"       → pure-PyTorch recurrent fallback (correct but ~5-10× slower)
+#
+# Set by warmup_fla_kernels() at training startup.  Falls through chunk →
+# recurrent → off, stopping at the first mode whose backward pass succeeds.
+_fla_mode: str = "chunk" if _FLA_AVAILABLE else "off"
+
+
+def warmup_fla_kernels(device: torch.device = None):
+    """Probe FLA Triton kernels with a tiny forward+backward and select the
+    best working mode.  Must be called **before** the first training step so
+    that a Triton compilation failure doesn't crash real training.
+
+    Sets the module-level ``_fla_mode`` to 'chunk', 'recurrent', or 'off'.
+    """
+    global _fla_mode
+    if not _FLA_AVAILABLE:
+        _fla_mode = "off"
+        return _fla_mode
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    B, T, H, D_k, D_v = 1, 16, 2, 32, 32
+    q = torch.randn(B, T, H, D_k, device=device, dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn(B, T, H, D_v, device=device, dtype=torch.bfloat16, requires_grad=True)
+    g = torch.randn(B, T, H, device=device, dtype=torch.bfloat16).abs().neg()  # < 0
+    beta = torch.rand(B, T, H, device=device, dtype=torch.bfloat16)
+
+    for mode, kernel in (("chunk", chunk_gated_delta_rule),
+                         ("recurrent", fused_recurrent_gated_delta_rule)):
+        try:
+            # Fresh tensors for each probe (autograd graph is consumed by backward)
+            q_ = q.detach().clone().requires_grad_(True)
+            k_ = k.detach().clone().requires_grad_(True)
+            v_ = v.detach().clone().requires_grad_(True)
+            o, _ = kernel(q=q_, k=k_, v=v_, g=g.to(q_.dtype), beta=beta,
+                          output_final_state=False, use_qk_l2norm_in_kernel=True)
+            o.sum().backward()
+            _fla_mode = mode
+            return _fla_mode
+        except Exception:
+            continue
+
+    _fla_mode = "off"
+    return _fla_mode
+
+
 from model.attention import RMSNorm
 
 
@@ -287,17 +337,23 @@ class GatedDeltaNet(nn.Module):
         )                                                      # (B, T, H) < 0
 
         # ── Gated delta-rule kernel ────────────────────────────────────────
-        if _FLA_AVAILABLE:
-            # Fast path: Triton chunk-parallel or fused recurrent
-            use_chunk = self.training or T > 64
-            kernel = chunk_gated_delta_rule if use_chunk else fused_recurrent_gated_delta_rule
-            o, final_state = kernel(
+        if _fla_mode == "chunk":
+            o, final_state = chunk_gated_delta_rule(
                 q=q, k=k, v=v,
                 g=g.to(q.dtype),
                 beta=beta,
                 initial_state=initial_state,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,      # fla normalizes Q, K internally
+                use_qk_l2norm_in_kernel=True,
+            )
+        elif _fla_mode == "recurrent":
+            o, final_state = fused_recurrent_gated_delta_rule(
+                q=q, k=k, v=v,
+                g=g.to(q.dtype),
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
             )
         else:
             # Slow path: pure-PyTorch recurrent (correct but ~5-10x slower)
