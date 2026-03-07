@@ -133,6 +133,10 @@ class StreamingPretrainDataset(IterableDataset):
                          buffer.  Set to 1 to disable shuffling.
         world_size:      total number of DDP ranks (sharding denominator).
         rank:            this process's DDP rank (sharding offset).
+        start_seq:       global sequence index to resume from (0 = beginning).
+                         Each worker offsets its shard start by this amount
+                         (wrapped modulo its shard size) so training picks up
+                         from the exact token it left off.  Ignored if 0.
     """
 
     def __init__(
@@ -143,12 +147,14 @@ class StreamingPretrainDataset(IterableDataset):
         shuffle_buffer: int = 2048,
         world_size: int = 1,
         rank: int = 0,
+        start_seq: int = 0,
     ):
         super().__init__()
         self.seq_len = seq_len
         self.shuffle_buffer = max(1, shuffle_buffer)
         self.world_size = world_size
         self.rank = rank
+        self.start_seq = start_seq
 
         bin_file = os.path.join(data_dir, f"{split}.bin")
         if not os.path.exists(bin_file):
@@ -196,14 +202,26 @@ class StreamingPretrainDataset(IterableDataset):
 
         # Partition sequences evenly across workers; drop remainder.
         seqs_per_worker = self._num_seqs // num_global_workers
-        start_seq = global_worker_id * seqs_per_worker
-        end_seq   = start_seq + seqs_per_worker
+        shard_start = global_worker_id * seqs_per_worker
+        shard_end   = shard_start + seqs_per_worker
+
+        # If resuming, advance each worker's starting position.
+        # start_seq is the *global* total sequences consumed across all workers.
+        # Divide by num_global_workers to get per-worker offset, then wrap.
+        if self.start_seq > 0:
+            per_worker_offset = self.start_seq // num_global_workers
+            per_worker_offset = per_worker_offset % seqs_per_worker  # wrap if past end
+            effective_start = shard_start + per_worker_offset
+        else:
+            effective_start = shard_start
 
         # Shuffle buffer: a list of pre-fetched (x, y) tensors.
         rng = random.Random(42 + global_worker_id)
         buf: list = []
 
-        for seq_idx in range(start_seq, end_seq):
+        # Iterate from the resume offset to shard end, then wrap around
+        # to cover sequences before the offset (full epoch coverage).
+        for seq_idx in range(effective_start, shard_end):
             s = seq_idx * self.seq_len
             chunk = torch.from_numpy(data[s : s + self.seq_len + 1].astype(np.int64))
             buf.append((chunk[:-1], chunk[1:]))

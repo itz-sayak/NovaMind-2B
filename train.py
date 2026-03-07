@@ -203,7 +203,7 @@ def evaluate(model, val_dataloader, config, ctx, rank, max_batches=50):
     return sum(losses) / len(losses) if losses else float("inf")
 
 
-def save_checkpoint(model, optimizer, step, config, loss, path, ema=None):
+def save_checkpoint(model, optimizer, step, config, loss, path, ema=None, total_tokens=0):
     """Save training checkpoint (call only from rank 0)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     raw_model = model.module if isinstance(model, DDP) else model
@@ -212,6 +212,7 @@ def save_checkpoint(model, optimizer, step, config, loss, path, ema=None):
         "optimizer": optimizer.state_dict(),
         "step": step,
         "loss": loss,
+        "total_tokens": total_tokens,
         "config": {
             "model": vars(NovaMind3BConfig()),
             "train": vars(config),
@@ -240,7 +241,7 @@ def load_checkpoint(path, model, optimizer=None, ema=None):
             ema.load_state_dict(checkpoint["ema"])
         except Exception as e:
             print(f"Warning: Could not load EMA state: {e}")
-    return checkpoint.get("step", 0), checkpoint.get("loss", float("inf"))
+    return checkpoint.get("step", 0), checkpoint.get("loss", float("inf")), checkpoint.get("total_tokens", 0)
 
 
 # ── W&B helpers ──────────────────────────────────────────────────────────────
@@ -503,15 +504,38 @@ def train(args):
     
     # Resume from checkpoint
     start_step = 0
+    total_tokens = 0
     if args.resume:
         resume_path = args.resume
         if os.path.exists(resume_path):
             if main:
                 print(f"Resuming from {resume_path}")
             raw_model = model.module if isinstance(model, DDP) else model
-            start_step, _ = load_checkpoint(resume_path, raw_model, optimizer, ema=ema)
+            start_step, _, saved_total_tokens = load_checkpoint(resume_path, raw_model, optimizer, ema=ema)
+            total_tokens = saved_total_tokens
             if main:
-                print(f"Resumed at step {start_step}")
+                print(f"Resumed at step {start_step}, total_tokens={total_tokens:,}")
+            # If --resume-data was passed, rebuild dataloader with offset
+            if getattr(args, 'resume_data', False) and saved_total_tokens > 0:
+                resume_seqs = saved_total_tokens // model_config.max_seq_len
+                if main:
+                    print(f"  Resuming data from sequence offset {resume_seqs:,}")
+                train_dataset = StreamingPretrainDataset(
+                    train_config.data_dir,
+                    seq_len=model_config.max_seq_len,
+                    split="train",
+                    shuffle_buffer=train_config.shuffle_buffer,
+                    world_size=world_size,
+                    rank=rank,
+                    start_seq=resume_seqs,
+                )
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=train_config.batch_size,
+                    num_workers=nw,
+                    pin_memory=(nw > 0),
+                    drop_last=True,
+                )
 
     # Training loop
     if main:
@@ -552,7 +576,8 @@ def train(args):
     running_loss = 0.0
     running_mtp_loss = 0.0
     running_grad_norm = 0.0
-    total_tokens = 0  # cumulative counter (accounts for batch-size warmup)
+    if not total_tokens:  # preserve resumed value if set
+        total_tokens = 0
     t0 = time.time()
 
     for step in range(start_step, train_config.max_steps):
@@ -740,7 +765,7 @@ def train(args):
                     save_checkpoint(
                         model, optimizer, step + 1, train_config, val_loss,
                         os.path.join(train_config.output_dir, "best.pt"),
-                        ema=ema,
+                        ema=ema, total_tokens=total_tokens,
                     )
 
         # Periodic save (rank 0 only)
@@ -748,7 +773,7 @@ def train(args):
             save_checkpoint(
                 model, optimizer, step + 1, train_config, running_loss,
                 os.path.join(train_config.output_dir, f"step_{step+1}.pt"),
-                ema=ema,
+                ema=ema, total_tokens=total_tokens,
             )
 
     # Final save
@@ -756,7 +781,7 @@ def train(args):
         save_checkpoint(
             model, optimizer, train_config.max_steps, train_config, running_loss,
             os.path.join(train_config.output_dir, "final.pt"),
-            ema=ema,
+            ema=ema, total_tokens=total_tokens,
         )
         print("\nTraining complete!")
         finish_wandb()
@@ -777,6 +802,9 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-test", action="store_true",
                         help="Shrink model to tiny size for local smoke testing")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--resume-data", action="store_true",
+                        help="On resume, skip to the exact data position saved in the checkpoint ")
+
     parser.add_argument("--data-dir", type=str, default=None,
                         help="Override PretrainConfig.data_dir (path containing train.bin/val.bin)")
     parser.add_argument("--output-dir", type=str, default=None,
