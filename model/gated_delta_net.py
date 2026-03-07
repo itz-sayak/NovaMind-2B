@@ -49,11 +49,29 @@ try:
     # Pre-stub both packages in sys.modules so their __init__.py files are
     # skipped entirely; subpackage lookups still work via __path__.
     import sys as _sys, types as _types, importlib.util as _ilu
+    import pathlib as _pathlib
     _fla_spec = _ilu.find_spec('fla')
     if _fla_spec is None:
         raise ImportError("flash-linear-attention not installed")
     import os.path as _osp
     _fla_root = _osp.dirname(_fla_spec.origin)
+    # ── Patch wy_fast.py BEFORE any fla imports ──────────────────────────
+    # Must happen before @triton.jit decorators capture the source.
+    # tl.trans(b_k) changes Triton MLIR encoding; the subsequent multiply
+    # triggers 'arith.mulf' encoding mismatch in Triton 3.2.0.
+    # Adding .to(b_k.dtype) forces Triton to re-derive the encoding.
+    _wy_file = _pathlib.Path(_fla_root) / 'ops' / 'gated_delta_rule' / 'wy_fast.py'
+    _BUGGY_LINE = 'b_ktb = b_kt * b_b[None, :]'
+    _FIXED_LINE = 'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]'
+    try:
+        if _wy_file.exists():
+            _wy_src = _wy_file.read_text()
+            if _BUGGY_LINE in _wy_src and _FIXED_LINE not in _wy_src:
+                _wy_file.write_text(_wy_src.replace(_BUGGY_LINE, _FIXED_LINE))
+                print(f"  [auto-patch] Fixed Triton encoding bug in {_wy_file}")
+    except OSError as _e:
+        print(f"  [auto-patch] Could not patch {_wy_file}: {_e}")
+    # ── Stub fla and fla.ops to skip heavy __init__.py imports ───────────
     for _pkg_name, _rel in (('fla', ''), ('fla.ops', 'ops')):
         if _pkg_name not in _sys.modules:
             _m = _types.ModuleType(_pkg_name)
@@ -65,32 +83,6 @@ try:
         chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule,
     )
-    # ── Monkey-patch wy_fast.py Triton kernel for triton 3.2.0 compat ────
-    # The prepare_wy_repr_bwd_kernel uses `tl.trans(b_k) * b_b[None, :]`
-    # which triggers an MLIR encoding mismatch: 'arith.mulf' op requires the
-    # same encoding for all operands and results.  Patching the source to add
-    # `.to(b_k.dtype)` after tl.trans() forces encoding re-derivation.
-    try:
-        import fla.ops.gated_delta_rule.wy_fast as _wy_mod
-        import pathlib as _pathlib
-        _wy_path = _pathlib.Path(_wy_mod.__file__)
-        _orig = _wy_path.read_text()
-        if 'b_ktb = b_kt * b_b[None, :]' in _orig and 'b_kt.to(b_k.dtype)' not in _orig:
-            _patched = _orig.replace(
-                'b_ktb = b_kt * b_b[None, :]',
-                'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]',
-            )
-            _wy_path.write_text(_patched)
-            import importlib as _il
-            _il.reload(_wy_mod)
-            if 'fla.ops.gated_delta_rule.chunk' in _sys.modules:
-                _il.reload(_sys.modules['fla.ops.gated_delta_rule.chunk'])
-            from fla.ops.gated_delta_rule import (
-                chunk_gated_delta_rule,
-                fused_recurrent_gated_delta_rule,
-            )
-    except Exception:
-        pass  # Non-critical; warmup_fla_kernels will detect if it still fails
     _FLA_AVAILABLE = True
 except (ImportError, RuntimeError):
     # ImportError  → fla not installed, _bz2 missing, FLA_DISABLE=1, etc.
