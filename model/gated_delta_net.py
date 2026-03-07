@@ -57,17 +57,26 @@ try:
     _fla_root = _osp.dirname(_fla_spec.origin)
     # ── Patch wy_fast.py BEFORE any fla imports ──────────────────────────
     # Must happen before @triton.jit decorators capture the source.
-    # tl.trans(b_k) changes Triton MLIR encoding; the subsequent multiply
-    # triggers 'arith.mulf' encoding mismatch in Triton 3.2.0.
-    # Adding .to(b_k.dtype) forces Triton to re-derive the encoding.
+    # Bug: `b_ktb = b_kt * b_b[None, :]` where b_kt = tl.trans(b_k)
+    # tl.trans() changes the MLIR block encoding; element-wise arith.mulf
+    # then fails with "requires the same encoding" in Triton 3.2.0.
+    # Fix: multiply BEFORE transpose → same math, compatible encoding.
+    # This matches the pattern already used elsewhere in the same kernel
+    # (lines ~182, ~196): multiply in standard encoding, then transpose.
     _wy_file = _pathlib.Path(_fla_root) / 'ops' / 'gated_delta_rule' / 'wy_fast.py'
-    _BUGGY_LINE = 'b_ktb = b_kt * b_b[None, :]'
-    _FIXED_LINE = 'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]'
+    _FIXED_LINE = 'b_ktb = tl.trans(b_k * b_b[:, None])'
     try:
         if _wy_file.exists():
             _wy_src = _wy_file.read_text()
-            if _BUGGY_LINE in _wy_src and _FIXED_LINE not in _wy_src:
-                _wy_file.write_text(_wy_src.replace(_BUGGY_LINE, _FIXED_LINE))
+            _needs_patch = False
+            # Handle both the original buggy line and our previous wrong fix
+            for _old in ('b_ktb = b_kt * b_b[None, :]',
+                         'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]'):
+                if _old in _wy_src:
+                    _wy_src = _wy_src.replace(_old, _FIXED_LINE)
+                    _needs_patch = True
+            if _needs_patch and _FIXED_LINE in _wy_src:
+                _wy_file.write_text(_wy_src)
                 print(f"  [auto-patch] Fixed Triton encoding bug in {_wy_file}")
     except OSError as _e:
         print(f"  [auto-patch] Could not patch {_wy_file}: {_e}")
