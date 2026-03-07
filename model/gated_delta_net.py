@@ -42,14 +42,33 @@ import os as _os
 try:
     if _os.environ.get("FLA_DISABLE", "0") == "1":
         raise ImportError("FLA_DISABLE=1")
+    # fla/__init__.py imports fla.layers and fla.models, which drag in
+    # transformers → torchvision → bz2 → _bz2 (absent in some pyenv builds
+    # compiled without libbz2 headers).  fla/ops/__init__.py imports every
+    # ops submodule (abc, linear_attn, …) which we don't need.
+    # Pre-stub both packages in sys.modules so their __init__.py files are
+    # skipped entirely; subpackage lookups still work via __path__.
+    import sys as _sys, types as _types, importlib.util as _ilu
+    _fla_spec = _ilu.find_spec('fla')
+    if _fla_spec is None:
+        raise ImportError("flash-linear-attention not installed")
+    import os.path as _osp
+    _fla_root = _osp.dirname(_fla_spec.origin)
+    for _pkg_name, _rel in (('fla', ''), ('fla.ops', 'ops')):
+        if _pkg_name not in _sys.modules:
+            _m = _types.ModuleType(_pkg_name)
+            _m.__path__ = [_osp.join(_fla_root, _rel) if _rel else _fla_root]
+            _m.__package__ = _pkg_name
+            _sys.modules[_pkg_name] = _m
+    del _fla_spec, _fla_root, _pkg_name, _rel, _m
     from fla.ops.gated_delta_rule import (
         chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule,
     )
     _FLA_AVAILABLE = True
 except (ImportError, RuntimeError):
-    # RuntimeError is raised by triton.autotune at import time when no GPU
-    # is visible (e.g. login node, CPU-only env, or missing CUDA driver).
+    # ImportError  → fla not installed, _bz2 missing, FLA_DISABLE=1, etc.
+    # RuntimeError → triton.autotune fires on a CPU-only node (no CUDA driver)
     _FLA_AVAILABLE = False
     chunk_gated_delta_rule = None
     fused_recurrent_gated_delta_rule = None
