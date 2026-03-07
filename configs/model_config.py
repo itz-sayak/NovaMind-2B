@@ -4,12 +4,12 @@ Hybrid 3B Reasoning Model Configuration.
 Architecture: GDN/MLA Hybrid + Dense SwiGLU FFN + RMSNorm + RoPE + MTP
   - 3:1 ratio of Gated DeltaNet (linear O(n)) to MLA (quadratic O(n²))
   - 20 GDN layers + 6 MLA layers = 26 total
-  - ~3.7B total parameters (all activated per token — no MoE)
+  - ~2.7B total parameters (all activated per token — no MoE)
 
-Target hardware: 2× NVIDIA L40S (2× 48 GB) via FSDP ZeRO-2
-  - VRAM budget: ~22 GB/GPU with FSDP ZeRO-2 + activation checkpointing
-    (weights 3.7GB + grads 7.4GB + Adam 14.8GB + activations ~14GB) / 2 GPUs
-  - Fits comfortably in 48 GB per GPU
+Target hardware: 2× NVIDIA L40S (2× 48 GB) via DDP
+  - VRAM budget per GPU: ~40 GB with activation checkpointing
+    (weights 5.4GB bf16 + grads 5.4GB + optimizer ~16GB + activations ~10GB)
+  - Fits in 48 GB per GPU
 """
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -21,7 +21,7 @@ class NovaMind3BConfig:
     vocab_size: int = 100352          # cl100k_base padded to multiple of 64
 
     # --- Transformer core ---
-    hidden_dim: int = 3072            # 2× the 1B hidden (1536→3072)
+    hidden_dim: int = 2560            # Sized for ~2.7B total params
     num_layers: int = 26              # 20 GDN + 6 MLA = 26 total
     max_seq_len: int = 8192
     dropout: float = 0.0
@@ -34,23 +34,23 @@ class NovaMind3BConfig:
     )
 
     # --- Gated DeltaNet config (for non-MLA layers in hybrid) ---
-    # Matches fla reference: key_dim = 0.75d, value_dim = 1.5d → 6d² params
-    gdn_num_heads: int = 9            # H (keys/queries)
-    gdn_head_dim: int = 256           # D_k per head (key_dim = 9×256 = 2304)
+    # Matches fla reference: key_dim = 0.8d, value_dim = 1.6d → 6d² params
+    gdn_num_heads: int = 8            # H (keys/queries)
+    gdn_head_dim: int = 256           # D_k per head (key_dim = 8×256 = 2048)
     gdn_expand_v: float = 2.0         # D_v = D_k × 2 = 512 (value_dim = 4608)
     gdn_use_gate: bool = True         # Output sigmoid gate + gated RMSNorm
     gdn_use_short_conv: bool = True   # Causal depthwise conv on Q, K, V
     gdn_conv_size: int = 4            # Conv kernel size
 
     # --- Multi-head Latent Attention (MLA) — for attention layers ---
-    n_heads: int = 24                 # 16→24; d_head=128 (24×128=3072)
-    d_head: int = 128                 # 96→128
-    d_kv_comp: int = 768              # hidden/4  (384→768)
-    d_q_comp: int = 1536              # hidden/2  (768→1536)
-    d_rope: int = 64                  # d_head/2  (48→64)
+    n_heads: int = 20                 # d_head=128 (20×128=2560)
+    d_head: int = 128
+    d_kv_comp: int = 640              # hidden/4
+    d_q_comp: int = 1280              # hidden/2
+    d_rope: int = 64                  # d_head/2
 
     # --- Feed-Forward Network (ALL layers dense) ---
-    dense_intermediate: int = 8192    # ≈2.67× hidden; SwiGLU ≈4× effective
+    dense_intermediate: int = 7040    # ≈2.75× hidden; SwiGLU ≈4× effective
     num_dense_layers: int = 26        # ALL layers are dense
 
     # --- MoE (DISABLED — all layers dense) ---
