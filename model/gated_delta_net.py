@@ -65,6 +65,36 @@ try:
         chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule,
     )
+    # ── Monkey-patch wy_fast.py Triton kernel for triton 3.2.0 compat ────
+    # The prepare_wy_repr_bwd_kernel uses `tl.trans(b_k) * b_b[None, :]`
+    # which triggers an MLIR encoding mismatch: 'arith.mulf' op requires the
+    # same encoding for all operands and results.  Patching the source to add
+    # `.to(b_k.dtype)` after tl.trans() forces encoding re-derivation.
+    try:
+        import fla.ops.gated_delta_rule.wy_fast as _wy_mod
+        import inspect as _inspect
+        _src = _inspect.getsource(_wy_mod.prepare_wy_repr_bwd_kernel.fn)
+        if 'b_ktb = b_kt * b_b[None, :]' in _src and 'b_kt.to(b_k.dtype)' not in _src:
+            import pathlib as _pathlib
+            _wy_path = _pathlib.Path(_wy_mod.__file__)
+            _orig = _wy_path.read_text()
+            _patched = _orig.replace(
+                'b_ktb = b_kt * b_b[None, :]',
+                'b_ktb = b_kt.to(b_k.dtype) * b_b[None, :]',
+            )
+            if _patched != _orig:
+                _wy_path.write_text(_patched)
+                # Force triton to recompile by clearing the cached kernel
+                import importlib
+                importlib.reload(_wy_mod)
+                # Re-import to pick up the patched kernel
+                importlib.reload(_sys.modules['fla.ops.gated_delta_rule.chunk'])
+                from fla.ops.gated_delta_rule import (
+                    chunk_gated_delta_rule,
+                    fused_recurrent_gated_delta_rule,
+                )
+    except Exception:
+        pass  # Non-critical; warmup_fla_kernels will detect if it still fails
     _FLA_AVAILABLE = True
 except (ImportError, RuntimeError):
     # ImportError  → fla not installed, _bz2 missing, FLA_DISABLE=1, etc.
@@ -98,12 +128,13 @@ def warmup_fla_kernels(device: torch.device = None, verbose: bool = True):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Warn about conflicting FLA packages
+    # Warn about conflicting FLA packages (fla-core vs flash-linear-attention)
     if verbose:
         try:
             import importlib.metadata as _im
+            _fla_pkg_names = {'fla-core', 'flash-linear-attention'}
             fla_dists = [d.metadata['Name'] for d in _im.distributions()
-                         if 'fla' in d.metadata['Name'].lower()]
+                         if d.metadata['Name'] in _fla_pkg_names]
             if len(fla_dists) > 1:
                 print(f"  WARNING: Multiple FLA packages installed: {fla_dists}")
                 print("  This causes Triton kernel conflicts. Fix with:")

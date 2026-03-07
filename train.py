@@ -400,6 +400,16 @@ def train(args):
                        "recurrent": "FLA fused-recurrent (chunk backward broken)",
                        "off": "pure-PyTorch recurrent (FLA unavailable)"}
         print(f"  GDN kernel: {mode_labels.get(fla_mode, fla_mode)}")
+    if fla_mode == "off" and not args.smoke_test:
+        raise RuntimeError(
+            "FLA Triton kernels are unavailable — cannot train at this scale.\n"
+            "The pure-PyTorch GDN fallback requires O(T) memory per layer and will OOM.\n"
+            "Fix: clear triton cache and reinstall FLA from source:\n"
+            "  rm -rf ~/.triton/cache\n"
+            "  pip uninstall fla-core flash-linear-attention -y\n"
+            "  pip install git+https://github.com/fla-org/flash-linear-attention.git "
+            "--force-reinstall --no-deps"
+        )
 
     # Compile before DDP wrap (torch.compile + DDP is supported in PyTorch 2.x)
     # torch.compile's inductor backend requires networkx (which in turn imports bz2).
