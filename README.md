@@ -72,10 +72,11 @@ pip install -r requirements.txt
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
 # flash-linear-attention provides Triton kernels for GatedDeltaNet training (~5-10x faster):
-pip install flash-linear-attention
+# Install from GitHub source — the PyPI package may be missing the fla.ops Triton kernels:
+pip install git+https://github.com/fla-org/flash-linear-attention.git --no-deps
 ```
 
-> **Note:** `flash-linear-attention` must be installed from the GitHub source — the PyPI package is missing the `fla.ops` Triton kernels. It is strongly recommended for training; without it the GDN layers automatically fall back to a correct but slower pure-PyTorch recurrent implementation.
+> **Note:** `flash-linear-attention` must be installed from the GitHub source for the full `fla.ops` Triton kernel set. It is required for training at sequence length 8192; without it training will abort (the pure-PyTorch GDN fallback OOMs at this scale). On environments with a broken `libbz2` (some pyenv builds), `import fla` may fail — this is handled automatically at import time.
 
 Create a `.env` file in the project root with your HuggingFace token (required for gated datasets):
 
@@ -198,13 +199,16 @@ python3 data/download.py --stage large_pretrain
 #### Training Configuration
 
 ```bash
-# Start pretraining on 2×L40S with DDP
-srun --partition=gpu2 --gres=gpu:2 \
-  conda run --no-capture-output -n deepfill \
-  python3 train.py --ddp
+# Start pretraining on 2×L40S with DDP (torchrun)
+srun --partition=gpu2 --gres=gpu:2 --ntasks=1 --cpus-per-task=16 --mem=128G --pty \
+  bash -c "torchrun --nproc_per_node=2 --master_port=29500 \
+    train.py \
+    --data-dir /path/to/datasets \
+    --output-dir /path/to/checkpoints/novamind-3b \
+    --wandb --wandb-project novamind-3b-pretrain"
 ```
 
-Each GPU processes a batch of 1 sequence; DDP all-reduce across 2 GPUs gives an effective batch of 2. With 16-step gradient accumulation the effective batch is 32 sequences × 2048 tokens = 65,536 tokens per step, targeting 400,000 steps (roughly 250–300 B tokens, disk-limited). The base learning rate is 2.2e-4 with a 4,000-step linear warmup via Warmup Schedule Dampening (WSD), followed by cosine decay to 2.2e-5. Hidden-layer weights use the Muon optimizer at lr=0.02; all other parameters use AdamW. Training runs in bfloat16 with gradient checkpointing (peak ~26 GB per GPU), EMA smoothing at β=0.9999, and Multi-Token Prediction depth=1 at weight=0.3. Checkpoints are saved periodically and training resumes automatically from the latest checkpoint in `novamind-3b/pretrain/`.
+Each GPU processes a batch of 1 sequence; DDP all-reduce across 2 GPUs gives an effective batch of 2. With 16-step gradient accumulation the effective batch is 32 sequences × 8192 tokens = 262,144 tokens per step, targeting 400,000 steps (~104.9 B tokens). The base learning rate is 2.2e-4 with a 4,000-step linear warmup via Warmup Schedule Dampening (WSD), followed by cosine decay to 2.2e-5. Hidden-layer weights use the Muon optimizer at lr=0.02; all other parameters use AdamW. Training runs in bfloat16 with gradient checkpointing, EMA smoothing at β=0.9999, and Multi-Token Prediction depth=1 at weight=0.3. Checkpoints are saved periodically and training resumes automatically from the latest checkpoint in `--output-dir`.
 
 ### Stage 2: Supervised Fine-Tuning (after pretraining checkpoint)
 
@@ -213,9 +217,9 @@ Each GPU processes a batch of 1 sequence; DDP all-reduce across 2 GPUs gives an 
 python3 data/download.py --stage sft
 
 # Fine-tune on 2×L40S
-srun --partition=gpu2 --gres=gpu:2 \
-  conda run --no-capture-output -n deepfill \
-  python3 sft.py --pretrained novamind-3b/pretrain/checkpoint-latest.pt --ddp
+srun --partition=gpu2 --gres=gpu:2 --ntasks=1 --cpus-per-task=16 --mem=128G --pty \
+  bash -c "torchrun --nproc_per_node=2 --master_port=29500 \
+    sft.py --pretrained /path/to/checkpoints/novamind-3b/checkpoint-latest.pt"
 ```
 
 Six instruction datasets are downloaded automatically: CodeAlpaca (20K, instruction code generation), MathInstruct (262K, math reasoning), OpenAssistant (conversational QA, via HuggingFace), Alpaca (52K, diverse instructions), Dolly 15K (15K, instruction-following), and SlimOrca (518K, synthetic high-quality instructions).
@@ -227,9 +231,9 @@ Six instruction datasets are downloaded automatically: CodeAlpaca (20K, instruct
 python3 data/download.py --stage dpo
 
 # DPO training on 2×L40S
-srun --partition=gpu2 --gres=gpu:2 \
-  conda run --no-capture-output -n deepfill \
-  python3 dpo.py --sft-checkpoint novamind-3b/sft/checkpoint-latest.pt --ddp
+srun --partition=gpu2 --gres=gpu:2 --ntasks=1 --cpus-per-task=16 --mem=128G --pty \
+  bash -c "torchrun --nproc_per_node=2 --master_port=29500 \
+    dpo.py --sft-checkpoint /path/to/checkpoints/novamind-3b/sft/checkpoint-latest.pt"
 ```
 
 ### Stage 4: Benchmarking
