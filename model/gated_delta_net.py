@@ -54,7 +54,13 @@ try:
     if _fla_spec is None:
         raise ImportError("flash-linear-attention not installed")
     import os.path as _osp
-    _fla_root = _osp.dirname(_fla_spec.origin)
+    # .origin is None for namespace packages (no __init__.py); use search locations
+    if _fla_spec.origin is not None:
+        _fla_root = _osp.dirname(_fla_spec.origin)
+    elif _fla_spec.submodule_search_locations:
+        _fla_root = list(_fla_spec.submodule_search_locations)[0]
+    else:
+        raise ImportError("Cannot locate fla package root")
     # ── Patch wy_fast.py BEFORE any fla imports ──────────────────────────
     # Must happen before @triton.jit decorators capture the source.
     # Bug: `b_ktb = b_kt * b_b[None, :]` where b_kt = tl.trans(b_k)
