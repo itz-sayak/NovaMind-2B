@@ -310,3 +310,76 @@ The following have been verified end-to-end: hybrid 3:1 GDN/MLA layer assignment
 ## References
 
 [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464) — Yang, Kautz & Hatamizadeh, ICLR 2025. [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484) — Yang et al., NeurIPS 2024. The [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) library provides the Triton kernels for GDN and other linear attention variants. The [Muon optimizer](https://github.com/KellerJordan/Muon) implements Newton-Schulz orthogonalization for hidden-layer weights. Tokenization uses [tiktoken](https://github.com/openai/tiktoken) (default) or [SentencePiece](https://github.com/google/sentencepiece) for custom BPE/Unigram training.
+
+## Environment Compatibility & Known Fixes
+
+This section documents real bugs and environment issues encountered while bringing NovaMind-3B up on a SLURM cluster (Python 3.11.9 pyenv, 2× NVIDIA L40S, Triton 3.2.0, CUDA 12.4) and the fixes applied.
+
+### 1. FLA import fails silently — `_bz2` missing in pyenv
+
+**Symptom:** `import flash_linear_attention` (or anything that pulls in `transformers` → `torchvision` → `bz2`) crashes with `ModuleNotFoundError: No module named '_bz2'` in pyenv environments built without `libbz2` headers.
+
+**Fix:** `model/gated_delta_net.py` pre-stubs `fla`, `fla.ops`, and `fla.modules` in `sys.modules` *before* any FLA import, which causes Python to skip the heavy `__init__.py` files entirely. Individual submodules (`fla.ops.gated_delta_rule.chunk`, `fla.ops.gated_delta_rule.wy_fast`, etc.) are then imported directly by path — they have no `_bz2` dependency themselves.
+
+### 2. Triton 3.2.0 MLIR encoding mismatch in `wy_fast.py`
+
+**Symptom:** Training crashes during the first backward pass with:
+```
+'arith.mulf' op requires the same encoding for all operands and results
+  loc(".../fla/ops/gated_delta_rule/wy_fast.py":223:37)
+```
+
+**Root cause:** Line 223 of `wy_fast.py` in `flash-linear-attention 0.4.2` reads:
+```python
+b_kt = tl.trans(b_k)
+b_ktb = b_kt * b_b[None, :]   # arith.mulf fails — tl.trans changes MLIR encoding
+```
+`tl.trans()` changes the Triton MLIR block encoding of the tensor. The subsequent element-wise multiply then sees operands with mismatched encodings, which is rejected by the Triton 3.2.0 MLIR backend during `PassManager::run`.
+
+**Fix:** Multiply *before* transposing — same mathematical result, both operands in standard encoding:
+```python
+b_ktb = tl.trans(b_k * b_b[:, None])   # fixed: multiply in standard encoding, then transpose
+```
+This matches the pattern already used at lines ~182 and ~196 of the same kernel. `model/gated_delta_net.py` applies this patch automatically to the installed `wy_fast.py` on disk at import time, before any `@triton.jit` decorator captures the source.
+
+### 3. `fla.modules` `__init__.py` imports all submodules on cluster
+
+**Symptom:** `from fla.ops.gated_delta_rule import chunk_gated_delta_rule` fails because `chunk.py` imports `from fla.modules.l2norm import ...`, which triggers `fla/modules/__init__.py` — that in turn imports every submodule including `conv/cuda`, `rotary`, etc., some of which have optional C-extension dependencies (`causal_conv1d`) that may not be installed.
+
+**Fix:** `fla.modules` is also pre-stubbed in `sys.modules`, so its `__init__.py` is skipped. `fla.modules.l2norm` and other specific submodules still import correctly by direct path.
+
+### 4. `fla` installed as a namespace package — `find_spec().origin` is `None`
+
+**Symptom:** `importlib.util.find_spec('fla').origin` returns `None` (namespace package with no `__init__.py`), causing `os.path.dirname(None)` to raise `TypeError`.
+
+**Fix:** Fall back to `spec.submodule_search_locations` when `.origin` is `None`:
+```python
+if _fla_spec.origin is not None:
+    _fla_root = os.path.dirname(_fla_spec.origin)
+else:
+    _fla_root = list(_fla_spec.submodule_search_locations)[0]
+```
+
+### 5. `torch.compile` crashes — `networkx` not importable
+
+**Symptom:** `torch.compile` (inductor backend) internally imports `networkx` for smart recomputation heuristics. On the same pyenv, `networkx` transitively imports `bz2`, which fails with `_bz2` missing, crashing the entire training process.
+
+**Fix:** `train.py` catches the `networkx` import at startup and automatically disables `torch.compile` with a warning when it is not importable:
+```python
+try:
+    import networkx
+except Exception:
+    warnings.warn("networkx not importable (missing _bz2?). Disabling torch.compile.")
+    args.compile = False
+```
+
+### 6. FLA `fused_recurrent_gated_delta_rule` has no backward for gating
+
+**Symptom:** `warmup_fla_kernels()` falls through to `fused_recurrent_gated_delta_rule` and the backward raises `NotImplementedError: Backward pass is not implemented yet and we do not have plans to implement it because we haven't figured out how to compute dg without materializing the full hidden states for all time steps.`
+
+**Fix:** This is a known upstream limitation — `fused_recurrent_gated_delta_rule` does not support training when the `g` (gating) parameter requires gradients. The warmup probe detects this and falls back. Only `chunk_gated_delta_rule` has a full forward+backward and is viable for training.
+
+### 7. Pure-PyTorch GDN fallback OOMs at sequence length 8192
+
+If both FLA modes fail, `train.py` aborts immediately with a clear error rather than attempting training with the pure-PyTorch recurrent fallback. The fallback requires materialising O(T) hidden states per GDN layer — at T=8192 and 20 GDN layers this would require ~47 GB per GPU, exceeding the L40S's 48 GB.
+
