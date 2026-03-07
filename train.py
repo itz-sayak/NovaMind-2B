@@ -392,6 +392,17 @@ def train(args):
     model = model.to(device=device, dtype=torch.bfloat16)
 
     # Compile before DDP wrap (torch.compile + DDP is supported in PyTorch 2.x)
+    # torch.compile's inductor backend requires networkx (which in turn imports bz2).
+    # On environments where _bz2 is missing (e.g. pyenv built without libbz2), networkx
+    # is not importable and compile would crash at the first backward pass. Auto-disable.
+    if train_config.compile and hasattr(torch, "compile"):
+        try:
+            import networkx  # noqa: F401
+        except (ImportError, ModuleNotFoundError):
+            if main:
+                print("Warning: networkx not importable (missing _bz2?). "
+                      "Disabling torch.compile to avoid inductor crash.")
+            train_config.compile = False
     if train_config.compile and hasattr(torch, "compile"):
         if main:
             print("Compiling model with torch.compile...")
