@@ -1,7 +1,7 @@
 # ── Core (CUDA 12.4 build — reinstall from scratch if switching CUDA) ─────
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
-torchaudio==2.5.1
+torchaudio==2.6.0+cu124
 triton==3.2.0
 
 # ── Attention kernels ─────────────────────────────────────────────────────
@@ -14,28 +14,28 @@ flash-attn==2.7.2.post1
 einops==0.8.2
 
 # ── Data / tokenization ───────────────────────────────────────────────────
-numpy==2.2.6
+numpy==2.4.2
 tiktoken==0.12.0
 sentencepiece==0.2.1
 datasets==4.6.1
-pyarrow==22.0.0
+pyarrow==23.0.1
 tqdm==4.67.3
 requests==2.32.5
-huggingface_hub==1.5.0
+huggingface_hub==1.6.0
 tokenizers==0.22.2
-transformers==5.1.0
+transformers==5.3.0
 accelerate==1.11.0
 safetensors==0.7.0
 fsspec==2026.2.0
-multiprocess==0.70.16
-dill==0.3.8
-aiohttp==3.10.10
+multiprocess==0.70.18
+dill==0.4.0
+aiohttp==3.13.3
 
 # ── Experiment tracking ───────────────────────────────────────────────────
-wandb==0.24.2
+wandb==0.25.0
 
 # ── Numerics / utilities ──────────────────────────────────────────────────
 scipy==1.15.3
-regex==2024.11.6
-packaging==25.0
-filelock==3.20.0
+regex==2026.2.28
+packaging==26.0
+filelock==3.25.0
