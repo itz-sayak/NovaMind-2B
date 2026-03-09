@@ -139,7 +139,16 @@ def get_mtp_weight(step, config):
 
 
 def get_grad_accum(step, config):
-    """Batch-size warmup: ramp gradient accumulation from initial -> full."""
+    """Batch-size warmup: ramp gradient accumulation from initial -> full.
+
+    Warmup only applies when grad_accum_initial < gradient_accumulation_steps
+    (i.e. starting small and growing).  If the target is already <= initial
+    (e.g. --grad-accum 1 with grad_accum_initial=4), skip the warmup entirely
+    to avoid running more micro-steps than the user requested.
+    """
+    if config.grad_accum_initial >= config.gradient_accumulation_steps:
+        # No warmup: target is already at or below the initial value.
+        return config.gradient_accumulation_steps
     if step >= config.grad_accum_warmup_steps:
         return config.gradient_accumulation_steps
     frac = step / max(1, config.grad_accum_warmup_steps)

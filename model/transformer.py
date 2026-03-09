@@ -284,10 +284,15 @@ class NovaMind3B(nn.Module):
             past_kv = past_kv_list[i] if past_kv_list is not None else None
 
             if self.config.gradient_checkpointing and self.training and not use_cache:
-                # Gradient checkpointing for memory savings
+                # Gradient checkpointing: use_reentrant=True runs each layer inside
+                # torch.no_grad(), which ensures that FLA Triton kernels' backward
+                # saved tensors (ctx.save_for_backward) have no live grad_fn and are
+                # freed immediately after each layer.  use_reentrant=False uses
+                # saved_tensors_hooks which can fail to intercept FLA's non-standard
+                # storage, letting ~1.8 GB/layer pile up across 20 GDN layers (~36 GB).
                 x, balance_loss, expert_counts, new_cache = checkpoint(
                     layer, x, None, None, False,
-                    use_reentrant=False
+                    use_reentrant=True
                 )
             else:
                 x, balance_loss, expert_counts, new_cache = layer(
@@ -349,7 +354,7 @@ class NovaMind3B(nn.Module):
                     if self.config.gradient_checkpointing:
                         mtp_h, mtp_balance_loss = checkpoint(
                             self.mtp, mtp_hidden, mtp_next_emb, output_weight,
-                            use_reentrant=False,
+                            use_reentrant=True,
                         )
                     else:
                         mtp_h, mtp_balance_loss = self.mtp(
