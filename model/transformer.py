@@ -28,7 +28,7 @@ def chunked_cross_entropy(
     hidden: torch.Tensor,
     weight: torch.Tensor,
     targets: torch.Tensor,
-    chunk_size: int = 512,
+    chunk_size: int = 64,
     ignore_index: int = -1,
 ) -> torch.Tensor:
     """Compute linear-projection + cross-entropy in chunks.
@@ -36,6 +36,10 @@ def chunked_cross_entropy(
     Instead of materialising the full (N, V) logits tensor in float32
     (~3 GiB for seq 8192 and vocab 100k), we process *chunk_size* tokens
     at a time and accumulate the loss.
+
+    chunk_size=64: each chunk allocates (64, 100352) fp32 ≈ 25 MB — safe
+    at 100K sequence length where only ~80 MB GPU VRAM may remain.
+    (chunk_size=512 would allocate 196 MB and OOM at long context lengths.)
 
     Args:
         hidden: (N, D)  hidden states  (bf16 ok)
@@ -325,6 +329,7 @@ class NovaMind3B(nn.Module):
             shift_targets = targets.contiguous().view(-1)         # (B*T,)
             loss = chunked_cross_entropy(shift_hidden, output_weight, shift_targets)
             result["loss"] = loss
+            del shift_hidden  # free immediately — may be a non-view copy at 100K
 
             # Also expose logits if not already set (needed in rare eval-with-targets paths)
             if result["logits"] is None and not self.training:
@@ -338,9 +343,18 @@ class NovaMind3B(nn.Module):
                     mtp_next_emb = self.embedding(input_ids[:, 1:-1])  # (B, T-2, D) next-token embeds
                     mtp_targets = targets[:, 1:-1]                     # (B, T-2) = chunk[2:T], 2 steps ahead
 
-                    mtp_h, mtp_balance_loss = self.mtp(
-                        mtp_hidden, mtp_next_emb, output_weight
-                    )
+                    # Apply gradient checkpointing to the MTP block — at 100K sequence length
+                    # the un-checkpointed MLA attention inside MTP holds Q/K/V tensors
+                    # totalling ~5 GB in the autograd graph, causing backward OOM.
+                    if self.config.gradient_checkpointing:
+                        mtp_h, mtp_balance_loss = checkpoint(
+                            self.mtp, mtp_hidden, mtp_next_emb, output_weight,
+                            use_reentrant=False,
+                        )
+                    else:
+                        mtp_h, mtp_balance_loss = self.mtp(
+                            mtp_hidden, mtp_next_emb, output_weight
+                        )
 
                     # Chunked cross-entropy for MTP logits
                     mtp_h_flat = mtp_h.contiguous().view(-1, mtp_h.size(-1))
