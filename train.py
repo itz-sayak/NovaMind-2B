@@ -319,6 +319,8 @@ def train(args):
         train_config.max_steps = args.max_steps
     if args.seq_len:
         model_config.max_seq_len = args.seq_len
+    if args.rope_base:
+        model_config.rope_base = args.rope_base
     if args.no_mtp:
         model_config.mtp_depth = 0
         train_config.use_mtp = False
@@ -511,8 +513,20 @@ def train(args):
             if main:
                 print(f"Resuming from {resume_path}")
             raw_model = model.module if isinstance(model, DDP) else model
-            start_step, _, saved_total_tokens = load_checkpoint(resume_path, raw_model, optimizer, ema=ema)
-            total_tokens = saved_total_tokens
+            # --weights-only: load model weights only, discard optimizer state.
+            # Use this for context extension where old optimizer momentum is stale.
+            _opt = None if args.weights_only else optimizer
+            _ema = None if args.weights_only else ema
+            step_from_ckpt, _, saved_total_tokens = load_checkpoint(resume_path, raw_model, _opt, ema=_ema)
+            # --reset-step: start a fresh LR schedule from step 0 (new training phase)
+            if args.reset_step:
+                start_step = 0
+                total_tokens = 0
+                if main:
+                    print(f"  Loaded weights from step {step_from_ckpt} (step counter reset to 0)")
+            else:
+                start_step = step_from_ckpt
+                total_tokens = saved_total_tokens
             if main:
                 print(f"Resumed at step {start_step}, total_tokens={total_tokens:,}")
             # If --resume-data was passed, rebuild dataloader with offset
@@ -804,6 +818,15 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--resume-data", action="store_true",
                         help="On resume, skip to the exact data position saved in the checkpoint ")
+    parser.add_argument("--weights-only", action="store_true",
+                        help="Load model weights only from checkpoint, discard optimizer/EMA state. "
+                             "Use for context extension: old optimizer momentum is stale at new seq len.")
+    parser.add_argument("--reset-step", action="store_true",
+                        help="Reset step counter to 0 after loading from checkpoint. "
+                             "Starts a fresh WSD LR schedule (required for context extension phase).")
+    parser.add_argument("--rope-base", type=float, default=None,
+                        help="Override model_config.rope_base (RoPE theta). "
+                             "For context extension: ~2e6 for 64k, ~6.5e6 for 100k (NTK-aware).")
 
     parser.add_argument("--data-dir", type=str, default=None,
                         help="Override PretrainConfig.data_dir (path containing train.bin/val.bin)")
