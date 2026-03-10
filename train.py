@@ -801,6 +801,7 @@ def train(args):
         
         # Evaluation
         if (step + 1) % train_config.eval_interval == 0:
+            torch.cuda.empty_cache()
             val_loss = evaluate(model, val_loader, train_config, ctx, rank)
             if main:
                 val_ppl = math.exp(min(val_loss, 20))

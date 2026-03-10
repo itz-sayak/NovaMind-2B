@@ -340,11 +340,6 @@ class NovaMind2B(nn.Module):
             result["loss"] = loss
             del shift_hidden  # free immediately — may be a non-view copy at 100K
 
-            # Also expose logits if not already set (needed in rare eval-with-targets paths)
-            if result["logits"] is None and not self.training:
-                logits = F.linear(x, output_weight)
-                result["logits"] = logits
-
             # Multi-Token Prediction loss
             if self.mtp is not None and self.training:
                 if T > 2:
