@@ -6,18 +6,17 @@ from dataclasses import dataclass, field
 
 @dataclass
 class PretrainConfig:
-    """Stage 1: Pretraining on code + math + general text."""
+    """Stage 1: Pretraining on code + math + general text (native 64K context)."""
     # Data
     data_dir: str = "/mnt/zone/A/datasets/pretrain"
-    max_seq_len: int = 8192
-    
+
     # Training
-    # 2 GPUs × batch=1 × grad_accum=16 × seq=8192 = 262,144 tokens/step
-    # 400k steps × 262k = ~105B tokens (Chinchilla-optimal for 3B is 60B;
-    # 105B intentionally overtrained for inference-efficiency: Phi/TinyLlama style)
-    batch_size: int = 1             # micro batch per GPU (safe for 3B @ 48GB)
-    gradient_accumulation_steps: int = 16
-    max_steps: int = 400_000
+    # 2 GPUs × batch=1 × grad_accum=1 × seq=65536 = 131,072 tokens/step
+    # 1.5M steps × 131K ≈ 196B tokens  (Chinchilla-optimal for 3B is ~60B;
+    # ~3× Chinchilla intentionally overtrains for inference efficiency)
+    batch_size: int = 1             # micro batch per GPU (tight at 65K, needs all VRAM)
+    gradient_accumulation_steps: int = 1
+    max_steps: int = 1_500_000
     warmup_steps: int = 2000
     
     # Optimizer (Muon + AdamW)
@@ -47,7 +46,8 @@ class PretrainConfig:
     output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/pretrain"
     
     # Batch-size warmup (grad_accum ramps from initial -> full)
-    grad_accum_initial: int = 4
+    # Both set to 1 → no warmup; ramp only applies when initial < target.
+    grad_accum_initial: int = 1
     grad_accum_warmup_steps: int = 5000
 
     # EMA (stored on CPU)
@@ -149,42 +149,37 @@ class DPOConfig:
 
 @dataclass
 class LongContextConfig:
-    """Context extension: continued pretraining from an 8K checkpoint to 64K or 100K.
+    """Context extension: continued pretraining from the 64K checkpoint to 100K.
 
     Strategy:
-      - NTK-aware RoPE base scaling:  ~2e6 for 64K,  ~6.5e6 for 100K
+      - NTK-aware RoPE base scaling: ~6.5e6 for 100K
       - Lower LR (~10% of pretrain peak) with a fresh WSD schedule
-      - Short run (~5K steps ≈ 2-5B tokens), mix long + short sequences
-      - Load weights only from the 8K checkpoint (discard stale optimizer state)
+      - Short run (~5K steps ≈ 1B tokens)
+      - Load weights only from the 64K checkpoint (discard stale optimizer state)
 
-    Launch command (64K example):
+    Launch command (100K example):
         torchrun --nproc_per_node=2 train.py \\
-            --resume /mnt/zone/A/checkpoints/novamind-3b/pretrain/latest.pt \\
+            --resume <64k_output_dir>/latest.pt \\
             --weights-only --reset-step \\
-            --seq-len 65536 \\
-            --rope-base 2000000 \\
+            --seq-len 102400 \\
+            --rope-base 6500000 \\
             --max-steps 5000 \\
-            --grad-accum 16 \\
-            --data-dir /mnt/zone/A/datasets/pretrain \\
-            --output-dir /mnt/zone/A/checkpoints/novamind-3b/longctx_64k \\
-            --wandb --wandb-run-name longctx-64k
-
-    For 100K:
-        --seq-len 102400 --rope-base 6500000
-        --output-dir /mnt/zone/A/checkpoints/novamind-3b/longctx_100k
+            --grad-accum 1 \\
+            --data-dir <data_dir> \\
+            --output-dir <output_dir>/longctx_100k \\
+            --wandb --wandb-run-name longctx-100k
     """
-    # Data — same tokenized bin as pretrain, StreamingPretrainDataset
-    # will auto-pack into the new seq_len without re-tokenizing
+    # Data — same tokenized bin as pretrain
     data_dir: str = "/mnt/zone/A/datasets/pretrain"
 
-    # --- Context / RoPE ---
-    max_seq_len: int = 65536          # 64K (change to 102400 for 100K)
-    rope_base: float = 2_000_000.0    # NTK-aware; use 6_500_000.0 for 100K
+    # --- Context / RoPE (100K extension from 64K base) ---
+    max_seq_len: int = 102400         # 100K
+    rope_base: float = 6_500_000.0    # NTK-aware for 100K
 
     # --- Training (fresh schedule, 10% of pretrain LR) ---
-    batch_size: int = 1               # MLA O(n²) at 64K needs full memory budget
-    gradient_accumulation_steps: int = 16
-    # 5000 steps × 2GPU × 1 × 16 × 65536 ≈ 10.5B tokens
+    batch_size: int = 1
+    gradient_accumulation_steps: int = 1
+    # 5000 steps × 2GPU × 1 × 1 × 102400 ≈ 1B tokens
     max_steps: int = 5_000
     warmup_steps: int = 200
     decay_fraction: float = 0.20      # final 20% cosine decay
@@ -209,8 +204,8 @@ class LongContextConfig:
     save_interval: int = 1_000
     output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/longctx_64k"
 
-    # Batch-size warmup (start gentle — 64K sequences are heavy)
-    grad_accum_initial: int = 4
+    # Batch-size warmup: no ramp (grad_accum=1 throughout)
+    grad_accum_initial: int = 1
     grad_accum_warmup_steps: int = 500
 
     ema_enabled: bool = True

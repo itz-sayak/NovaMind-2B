@@ -23,7 +23,7 @@ class NovaMind3BConfig:
     # --- Transformer core ---
     hidden_dim: int = 2560            # Sized for ~2.7B total params
     num_layers: int = 26              # 20 GDN + 6 MLA = 26 total
-    max_seq_len: int = 8192
+    max_seq_len: int = 65536          # Native 64K training
     dropout: float = 0.0
 
     # --- Hybrid Architecture ---
@@ -76,7 +76,7 @@ class NovaMind3BConfig:
 
     # --- Normalization ---
     rms_norm_eps: float = 1e-6
-    rope_base: float = 500_000.0      # Long-range RoPE (LLaMA-3 style)
+    rope_base: float = 2_000_000.0    # NTK-aware for native 64K: base = 2e6
     # Position interpolation scale factor for context extension.
     # Pretrain: 1.0 (no scaling, max_seq_len=8192).
     # SFT/DPO at 128K: set to 16.0 (= 131072 / 8192) so positions are
