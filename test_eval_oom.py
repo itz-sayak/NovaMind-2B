@@ -20,15 +20,18 @@ from model.transformer import NovaMind2B
 DATA_DIR = "/iitgn/home/sayak.dutta/GPT/datasets"
 
 
-def load_real_batch(data_dir, seq_len, rank, device):
-    """Load one real sequence from train.bin (offset by rank to avoid overlap)."""
+def load_real_batch(data_dir, seq_len, batch_size, rank, device):
+    """Load batch_size real sequences from train.bin (offset by rank)."""
     bin_file = os.path.join(data_dir, "train.bin")
     data = np.memmap(bin_file, dtype=np.uint32, mode='r')
-    # Use a different offset per rank so both GPUs get different tokens
-    start = rank * (seq_len + 1)
-    chunk = torch.from_numpy(data[start : start + seq_len + 1].astype(np.int64))
-    x = chunk[:-1].unsqueeze(0).to(device)  # (1, seq_len)
-    y = chunk[1:].unsqueeze(0).to(device)   # (1, seq_len)
+    xs, ys = [], []
+    for b in range(batch_size):
+        start = (rank * batch_size + b) * (seq_len + 1)
+        chunk = torch.from_numpy(data[start : start + seq_len + 1].astype(np.int64))
+        xs.append(chunk[:-1])
+        ys.append(chunk[1:])
+    x = torch.stack(xs).to(device)  # (batch_size, seq_len)
+    y = torch.stack(ys).to(device)
     return x, y
 
 def main():
@@ -40,7 +43,7 @@ def main():
     device = f"cuda:{rank}"
     dtype = torch.bfloat16
     seq_len = 65536
-    batch_size = 1
+    batch_size = 2
     grad_accum = 4  # matches gradient_accumulation_steps = 4
 
     if rank == 0:
@@ -66,7 +69,7 @@ def main():
     # ---- Dummy batch (same shape as training) ----
     if rank == 0:
         print(f"\nLoading real tokens from {DATA_DIR}/train.bin ...")
-    x, y = load_real_batch(DATA_DIR, seq_len, rank, device)
+    x, y = load_real_batch(DATA_DIR, seq_len, batch_size, rank, device)
     if rank == 0:
         print(f"  Batch shape: x={tuple(x.shape)}, y={tuple(y.shape)}")
 
