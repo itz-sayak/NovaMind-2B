@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from configs.model_config import NovaMind2BConfig
-from model.transformer import NovaMindModel
+from model.transformer import NovaMind2B
 
 def main():
     # ---- DDP init ----
@@ -39,7 +39,7 @@ def main():
     if rank == 0:
         print("\nInitializing model...")
     config = NovaMind2BConfig()
-    model = NovaMindModel(config).to(device=device, dtype=dtype)
+    model = NovaMind2B(config).to(device=device, dtype=dtype)
     model = DDP(model, device_ids=[rank])
 
     if rank == 0:
