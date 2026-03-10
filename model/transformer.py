@@ -14,6 +14,8 @@ The 3:1 GDN/MLA hybrid ratio achieves massive inference speedups at long
 context lengths while retaining strong retrieval quality via periodic
 full-attention layers.
 """
+import gc
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -346,6 +348,13 @@ class NovaMind3B(nn.Module):
             # Multi-Token Prediction loss
             if self.mtp is not None and self.training:
                 if T > 2:
+                    # At long context, reclaim dead PyTorch cached blocks before
+                    # the MTP MLA layer allocates its Q/K/V tensors.
+                    if T > 16384:
+                        del shift_targets
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
                     mtp_hidden = x[:, :-2, :]                         # (B, T-2, D) positions 0..T-3
                     mtp_next_emb = self.embedding(input_ids[:, 1:-1])  # (B, T-2, D) next-token embeds
                     mtp_targets = targets[:, 1:-1]                     # (B, T-2) = chunk[2:T], 2 steps ahead

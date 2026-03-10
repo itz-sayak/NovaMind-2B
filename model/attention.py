@@ -62,10 +62,20 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(x, cos, sin):
-    """Apply RoPE to input tensor."""
-    # x: (B, n_heads, T, d_rope)
-    cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, T, d_rope)
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    """Apply RoPE to input tensor.
+
+    Supports both (B, n_heads, T, d_rope) and (B, T, n_heads, d_rope) layouts
+    via automatic shape detection: if x.shape[1] == cos.shape[0] the sequence
+    dimension is 1 (seq-first), otherwise it's assumed to be 2 (heads-first).
+    """
+    if x.shape[1] == cos.shape[0]:
+        # Seq-first layout: (B, T, n_h, d)
+        cos = cos.unsqueeze(0).unsqueeze(2)   # (1, T, 1, d_rope)
+        sin = sin.unsqueeze(0).unsqueeze(2)
+    else:
+        # Heads-first layout: (B, n_h, T, d)
+        cos = cos.unsqueeze(0).unsqueeze(0)   # (1, 1, T, d_rope)
+        sin = sin.unsqueeze(0).unsqueeze(0)
     return x * cos + rotate_half(x) * sin
 
 
@@ -143,10 +153,12 @@ class MultiHeadLatentAttention(nn.Module):
         c_Q = self.q_norm(self.W_DQ(x))   # (B, T, d_q_comp)
         q_C = self.W_UQ(c_Q)               # (B, T, n_h * d_h)
         q_R = self.W_QR(c_Q)               # (B, T, n_h * d_rope)
+        del c_Q
 
-        # Reshape for multi-head
-        q_C = q_C.view(B, T, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_h, T, d_h)
-        q_R = q_R.view(B, T, self.n_heads, self.d_rope).transpose(1, 2)  # (B, n_h, T, d_rope)
+        # Reshape for multi-head — stay in seq-first layout (B, T, n_h, d)
+        # to avoid 480 MB contiguous copies when converting to FlashAttention format.
+        q_C = q_C.view(B, T, self.n_heads, self.d_head)     # (B, T, n_h, d_h)
+        q_R = q_R.view(B, T, self.n_heads, self.d_rope)     # (B, T, n_h, d_rope)
 
         # --- KV path ---
         c_KV = self.kv_norm(self.W_DKV(x))  # (B, T, d_kv_comp)
@@ -169,24 +181,23 @@ class MultiHeadLatentAttention(nn.Module):
 
         S = k_C.shape[1]  # total sequence length including cache
 
-        # Reshape K, V
-        k_C = k_C.view(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_h, S, d_h)
-        v_C = v_C.view(B, S, self.n_heads, self.d_head).transpose(1, 2)  # (B, n_h, S, d_h)
+        # Reshape K, V — seq-first layout (B, S, n_h, d)
+        k_C = k_C.view(B, S, self.n_heads, self.d_head)     # (B, S, n_h, d_h)
+        v_C = v_C.view(B, S, self.n_heads, self.d_head)     # (B, S, n_h, d_h)
 
-        # Broadcast k_R to all heads
-        k_R = k_R.unsqueeze(1).expand(-1, self.n_heads, -1, -1)  # (B, n_h, S, d_rope)
+        # Broadcast k_R to all heads — seq-first (B, S, n_h, d_rope)
+        k_R = k_R.view(B, S, 1, self.d_rope).expand(-1, -1, self.n_heads, -1)
 
-        # --- Apply RoPE to decoupled components ---
+        # --- Apply RoPE to decoupled components (seq-first) ---
         cos, sin = self.rotary_emb(S)
-        # For queries, apply RoPE to positions [S-T : S]
         q_cos, q_sin = cos[S - T:S], sin[S - T:S]
-        q_R = apply_rotary_pos_emb(q_R, q_cos, q_sin)
-        k_R = apply_rotary_pos_emb(k_R, cos[:S], sin[:S])
+        q_R = apply_rotary_pos_emb(q_R, q_cos, q_sin)    # (B, T, n_h, d_rope)
+        k_R = apply_rotary_pos_emb(k_R, cos[:S], sin[:S]) # (B, S, n_h, d_rope)
 
         # --- Concatenate content and RoPE components ---
-        # q = [q_C; q_R], k = [k_C; k_R]
-        q = torch.cat([q_C, q_R], dim=-1)   # (B, n_h, T, d_h + d_rope)
-        k = torch.cat([k_C, k_R], dim=-1)   # (B, n_h, S, d_h + d_rope)
+        q = torch.cat([q_C, q_R], dim=-1)   # (B, T, n_h, d_h + d_rope)
+        k = torch.cat([k_C, k_R], dim=-1)   # (B, S, n_h, d_h + d_rope)
+        del q_C, q_R, k_C, k_R
 
         # ── Attention kernel selection ─────────────────────────────────────
         # FlashAttention-2: O(T) memory, fused CUDA kernel, ~3× faster on L40S.
@@ -205,11 +216,12 @@ class MultiHeadLatentAttention(nn.Module):
         )
 
         if use_flash:
-            # Transpose from heads-first (B, n_h, T, d) → sequence-first (B, T, n_h, d)
-            # .contiguous() is required by the CUDA kernel.
-            q_fa = q.transpose(1, 2).contiguous()    # (B, T,  n_h, d_h+d_rope=192)
-            k_fa = k.transpose(1, 2).contiguous()    # (B, S,  n_h, d_h+d_rope=192)
-            v_fa = v_C.transpose(1, 2).contiguous()  # (B, S,  n_h, d_h=128)
+            # q, k already in seq-first (B, T, n_h, d) — just ensure contiguous.
+            # .contiguous() is a no-op when the view is already contiguous.
+            q_fa = q.contiguous()                    # (B, T,  n_h, d_h+d_rope=192)
+            k_fa = k.contiguous()                    # (B, S,  n_h, d_h+d_rope=192)
+            v_fa = v_C.contiguous()                  # (B, S,  n_h, d_h=128)
+            del q, k   # free intermediate cat results before padding
             # flash_attn_func requires q/k/v to share the same head dim.
             # Pad V from d_h (128) → d_h+d_rope (192) with zeros; slice back after.
             # Zero-pad is safe: attn_weights @ [v | 0] = [attn_weights @ v | 0].
@@ -226,20 +238,22 @@ class MultiHeadLatentAttention(nn.Module):
             # Discard the zero-padded tail → (B, T, n_h, d_h=128)
             attn_output = attn_output[..., :self.d_head].reshape(B, T, self.head_dim_total)
         else:
-            # Fallback: PyTorch 2.x SDPA (dispatches to memory-efficient / math kernel).
-            # Still uses O(T) memory via chunked attention; no explicit mask matrix built.
+            # Fallback: PyTorch 2.x SDPA — expects heads-first (B, n_h, T, d).
+            q_hf = q.transpose(1, 2)   # (B, n_h, T, d_h+d_rope)
+            k_hf = k.transpose(1, 2)   # (B, n_h, S, d_h+d_rope)
+            v_hf = v_C.transpose(1, 2) # (B, n_h, S, d_h)
+            del q, k
             if attention_mask is None:
                 attn_output = F.scaled_dot_product_attention(
-                    q, k, v_C,
+                    q_hf, k_hf, v_hf,
                     attn_mask=None,
                     dropout_p=dropout_p,
                     is_causal=True,
                     scale=self.scale,
                 )
             else:
-                # Additive mask (0 or -inf) provided — used during KV-cache inference.
                 attn_output = F.scaled_dot_product_attention(
-                    q, k, v_C,
+                    q_hf, k_hf, v_hf,
                     attn_mask=attention_mask,
                     dropout_p=dropout_p,
                     is_causal=False,
