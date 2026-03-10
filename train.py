@@ -596,11 +596,13 @@ def train(args):
     model.train()
     train_iter = iter(train_loader)
     best_val_loss = float("inf")
-    running_loss = 0.0
-    running_mtp_loss = 0.0
-    running_grad_norm = 0.0
+    running_loss       = 0.0
+    running_total_loss = 0.0
+    running_mtp_loss   = 0.0
+    running_grad_norm  = 0.0
     if not total_tokens:  # preserve resumed value if set
         total_tokens = 0
+    tokens_at_last_log = total_tokens
     t0 = time.time()
 
     for step in range(start_step, train_config.max_steps):
@@ -684,8 +686,9 @@ def train(args):
 
                 scaler.scale(scaled_loss).backward()
 
-            running_loss     += loss.item() / grad_accum
-            running_mtp_loss += mtp_loss.item() / grad_accum
+            running_loss       += loss.item() / grad_accum
+            running_total_loss += (loss.item() + mtp_weight * mtp_loss.item()) / grad_accum
+            running_mtp_loss   += mtp_loss.item() / grad_accum
 
         # Gradient clipping + grad norm tracking
         grad_norm = 0.0
@@ -719,12 +722,14 @@ def train(args):
         if main and (step + 1) % train_config.log_interval == 0:
             dt = time.time() - t0
             tokens_processed = total_tokens
-            step_tokens = train_config.batch_size * world_size * grad_accum * model_config.max_seq_len
-            tokens_per_sec = step_tokens * train_config.log_interval / dt
+            tokens_delta = total_tokens - tokens_at_last_log
+            tokens_per_sec = tokens_delta / max(dt, 1e-6)
+            step_time_ms = dt / train_config.log_interval * 1000
             # Divide by log_interval to get per-step averages
-            avg_loss      = running_loss     / train_config.log_interval
-            avg_mtp_loss  = running_mtp_loss / train_config.log_interval
-            avg_grad_norm = running_grad_norm / train_config.log_interval
+            avg_loss       = running_loss       / train_config.log_interval
+            avg_total_loss = running_total_loss / train_config.log_interval
+            avg_mtp_loss   = running_mtp_loss   / train_config.log_interval
+            avg_grad_norm  = running_grad_norm  / train_config.log_interval
             ppl = math.exp(min(avg_loss, 20))
             gpu_mem_gb = [
                 torch.cuda.memory_allocated(i) / 1e9
@@ -751,6 +756,7 @@ def train(args):
             if wandb_enabled:
                 log_wandb({
                     "train/loss":        avg_loss,
+                    "train/total_loss":  avg_total_loss,
                     "train/ppl":         ppl,
                     "train/mtp_loss":    avg_mtp_loss,
                     "train/mtp_weight":  mtp_weight,
@@ -758,15 +764,19 @@ def train(args):
                     "optimizer/lr":      lr,
                     "optimizer/muon_lr": muon_lr,
                     "optimizer/grad_accum": grad_accum,
+                    "optimizer/grad_scaler_scale": scaler.get_scale(),
                     "perf/tok_per_sec":  tokens_per_sec,
+                    "perf/step_time_ms": step_time_ms,
                     "perf/tokens_seen_B": tokens_processed / 1e9,
                     **{f"gpu/{i}/mem_alloc_gb":    gpu_mem_gb[i]    for i in range(len(gpu_mem_gb))},
                     **{f"gpu/{i}/mem_reserved_gb": gpu_reserved_gb[i] for i in range(len(gpu_reserved_gb))},
                 }, step=step + 1)
 
-            running_loss = 0.0
-            running_mtp_loss = 0.0
-            running_grad_norm = 0.0
+            running_loss       = 0.0
+            running_total_loss = 0.0
+            running_mtp_loss   = 0.0
+            running_grad_norm  = 0.0
+            tokens_at_last_log = total_tokens
             t0 = time.time()
         
         # Evaluation
@@ -843,7 +853,7 @@ if __name__ == "__main__":
                         help="Override PretrainConfig.output_dir (checkpoint save path)")
     # W&B
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb-project", type=str, default="novamind-3b-pretrain")
+    parser.add_argument("--wandb-project", type=str, default="novamind-2b-pretrain")
     parser.add_argument("--wandb-run-name", type=str, default=None,
                         help="W&B run name (defaults to auto-generated)")
     parser.add_argument("--wandb-entity", type=str, default=None,
