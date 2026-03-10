@@ -11,6 +11,7 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
+from contextlib import nullcontext
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from configs.model_config import NovaMind2BConfig
@@ -70,15 +71,23 @@ def main():
         print(f"  Batch shape: x={tuple(x.shape)}, y={tuple(y.shape)}")
 
     # ---- Simulate grad_accum training steps (to fill cache like real training) ----
+    # train.py calls raw model (bypassing DDP) with no_sync() for accumulation,
+    # then syncs only on the last micro-step.
     if rank == 0:
         print(f"Running {grad_accum} gradient accumulation steps (forward+backward each)...")
     model.train()
     ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
+    raw = model.module
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer.zero_grad(set_to_none=True)
     for acc_step in range(grad_accum):
-        with ctx:
-            result = model(x, targets=y)
-        (result["loss"] / grad_accum).backward()
-    model.zero_grad(set_to_none=True)
+        sync_ctx = nullcontext() if acc_step == grad_accum - 1 else model.no_sync()
+        with sync_ctx:
+            with ctx:
+                result = raw(x, targets=y)
+            (result["loss"] / grad_accum).backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
 
     if rank == 0:
         train_peak = torch.cuda.max_memory_allocated(device) / 1e9
