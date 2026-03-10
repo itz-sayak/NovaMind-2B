@@ -25,6 +25,7 @@ def main():
     dtype = torch.bfloat16
     seq_len = 65536
     batch_size = 1
+    grad_accum = 4  # matches gradient_accumulation_steps = 4
 
     if rank == 0:
         print("=" * 60)
@@ -48,18 +49,19 @@ def main():
 
     # ---- Dummy batch (same shape as training) ----
     if rank == 0:
-        print(f"\nCreating dummy batch: batch_size={batch_size}, seq_len={seq_len}")
+        print(f"\nCreating dummy batch: batch_size={batch_size}, seq_len={seq_len}, grad_accum={grad_accum}")
     x = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
     y = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
 
-    # ---- Simulate a training step first (to fill cache like real training) ----
+    # ---- Simulate grad_accum training steps (to fill cache like real training) ----
     if rank == 0:
-        print("Running one training forward+backward (to fill GPU cache)...")
+        print(f"Running {grad_accum} gradient accumulation steps (forward+backward each)...")
     model.train()
     ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
-    with ctx:
-        result = model(x, targets=y)
-    result["loss"].backward()
+    for acc_step in range(grad_accum):
+        with ctx:
+            result = model(x, targets=y)
+        (result["loss"] / grad_accum).backward()
     model.zero_grad(set_to_none=True)
 
     if rank == 0:
