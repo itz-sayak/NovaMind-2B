@@ -23,6 +23,13 @@ from model.attention import MultiHeadLatentAttention, RMSNorm
 from model.moe import NovaMindMoELayer, DenseFFN
 
 
+def _ce_one_chunk(h, w, tgt, ignore_idx):
+    """F.linear + cross_entropy for one chunk — called inside gradient
+    checkpoint so the fp32 log-softmax (~V×chunk ≈ 24 MB) is NOT saved."""
+    logits = F.linear(h, w)
+    return F.cross_entropy(logits, tgt, ignore_index=ignore_idx, reduction="sum")
+
+
 @torch.compiler.disable
 def chunked_cross_entropy(
     hidden: torch.Tensor,
@@ -31,15 +38,12 @@ def chunked_cross_entropy(
     chunk_size: int = 64,
     ignore_index: int = -1,
 ) -> torch.Tensor:
-    """Compute linear-projection + cross-entropy in chunks.
+    """Compute linear-projection + cross-entropy in memory-efficient chunks.
 
-    Instead of materialising the full (N, V) logits tensor in float32
-    (~3 GiB for seq 8192 and vocab 100k), we process *chunk_size* tokens
-    at a time and accumulate the loss.
-
-    chunk_size=64: each chunk allocates (64, 100352) fp32 ≈ 25 MB — safe
-    at 100K sequence length where only ~80 MB GPU VRAM may remain.
-    (chunk_size=512 would allocate 196 MB and OOM at long context lengths.)
+    Each chunk is gradient-checkpointed so the fp32 log-softmax intermediate
+    (~24 MB per chunk at V=100352) is NOT retained for backward.  Without
+    this, at 65K seq_len the 1024 chunks accumulate 1024 × 24 MB ≈ 25 GB
+    of backward storage — the #1 cause of long-context OOM.
 
     Args:
         hidden: (N, D)  hidden states  (bf16 ok)
@@ -49,8 +53,6 @@ def chunked_cross_entropy(
         ignore_index: label to ignore
     """
     N = hidden.shape[0]
-    # Accumulate in float32 — bf16 overflows at ~65504, but
-    # sum over 8192 tokens * CE~11.5 ≈ 94k which exceeds bf16 max.
     total_loss = torch.zeros((), dtype=torch.float32, device=hidden.device)
     total_valid = 0
 
@@ -60,13 +62,13 @@ def chunked_cross_entropy(
         valid = (tgt != ignore_index).sum().item()
         if valid == 0:
             continue
-        logits = F.linear(hidden[start:end], weight)  # (chunk, V)
-        chunk_loss = F.cross_entropy(
-            logits, tgt, ignore_index=ignore_index, reduction="sum"
+        h_chunk = hidden[start:end]
+        chunk_loss = checkpoint(
+            _ce_one_chunk, h_chunk, weight, tgt, ignore_index,
+            use_reentrant=False,
         )
         total_loss = total_loss + chunk_loss
         total_valid += valid
-        del logits, chunk_loss  # free immediately
 
     return (total_loss / max(total_valid, 1)).to(hidden.dtype)
 

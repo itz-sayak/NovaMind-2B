@@ -434,6 +434,9 @@ class GatedDeltaNet(nn.Module):
                 q, k, v, g, beta, initial_state, use_cache
             )
 
+        # Free large QKV tensors immediately — ~1 GB combined at 65K seq len.
+        del q, k, v, g, beta
+
         # ── Output gate + projection ──────────────────────────────────────
         if self.use_gate:
             g_out = self.g_proj(x).view(B, T, self.num_heads, self.head_v_dim)
