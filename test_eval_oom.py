@@ -2,18 +2,33 @@
 Quick DDP test to verify that evaluation does NOT OOM on 2× L40S.
 
 Simulates what happens at step 500: model wrapped in DDP, forward with
-targets in eval mode. If the fix works, this completes without CUDA OOM.
+targets in eval mode using REAL tokens from train.bin.
 
 Run with:
   torchrun --nproc_per_node=2 test_eval_oom.py
 """
 import os
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from configs.model_config import NovaMind2BConfig
 from model.transformer import NovaMind2B
+
+DATA_DIR = "/iitgn/home/sayak.dutta/GPT/datasets"
+
+
+def load_real_batch(data_dir, seq_len, rank, device):
+    """Load one real sequence from train.bin (offset by rank to avoid overlap)."""
+    bin_file = os.path.join(data_dir, "train.bin")
+    data = np.memmap(bin_file, dtype=np.uint32, mode='r')
+    # Use a different offset per rank so both GPUs get different tokens
+    start = rank * (seq_len + 1)
+    chunk = torch.from_numpy(data[start : start + seq_len + 1].astype(np.int64))
+    x = chunk[:-1].unsqueeze(0).to(device)  # (1, seq_len)
+    y = chunk[1:].unsqueeze(0).to(device)   # (1, seq_len)
+    return x, y
 
 def main():
     # ---- DDP init ----
@@ -49,9 +64,10 @@ def main():
 
     # ---- Dummy batch (same shape as training) ----
     if rank == 0:
-        print(f"\nCreating dummy batch: batch_size={batch_size}, seq_len={seq_len}, grad_accum={grad_accum}")
-    x = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
-    y = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
+        print(f"\nLoading real tokens from {DATA_DIR}/train.bin ...")
+    x, y = load_real_batch(DATA_DIR, seq_len, rank, device)
+    if rank == 0:
+        print(f"  Batch shape: x={tuple(x.shape)}, y={tuple(y.shape)}")
 
     # ---- Simulate grad_accum training steps (to fill cache like real training) ----
     if rank == 0:
