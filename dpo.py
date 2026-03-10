@@ -21,9 +21,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from configs.model_config import NovaMind3BConfig
+from configs.model_config import NovaMind2BConfig
 from configs.train_config import DPOConfig
-from model.transformer import NovaMind3B
+from model.transformer import NovaMind2B
 from data.dataset import DPODataset
 
 
@@ -77,7 +77,7 @@ def get_log_probs(model, input_ids, labels, loss_mask, ctx):
 
 def train_dpo(args):
     dpo_config = DPOConfig()
-    model_config = NovaMind3BConfig()
+    model_config = NovaMind2BConfig()
     model_config.mtp_depth = 0
     # Apply context extension overrides from DPOConfig.
     model_config.max_seq_len = dpo_config.max_seq_len
@@ -98,8 +98,8 @@ def train_dpo(args):
     
     # Initialize models
     print("\nInitializing policy and reference models...")
-    policy_model = NovaMind3B(model_config)
-    ref_model = NovaMind3B(model_config)
+    policy_model = NovaMind2B(model_config)
+    ref_model = NovaMind2B(model_config)
     
     # Load SFT checkpoint
     if args.sft_checkpoint:

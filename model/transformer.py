@@ -187,9 +187,9 @@ class MTPModule(nn.Module):
         return h_mtp, balance_loss
 
 
-class NovaMind3B(nn.Module):
+class NovaMind2B(nn.Module):
     """
-    Hybrid 3B Reasoning Model.
+    Hybrid 2B Reasoning Model.
 
     Architecture:
     - Token Embedding (tied with output head)
@@ -201,7 +201,7 @@ class NovaMind3B(nn.Module):
     - RMSNorm final layer
     - Multi-Token Prediction module (MTP depth=1, λ=0.3, MLA-based)
 
-    ~3.7B total parameters, all activated per token.
+    - ~2.0B total parameters, all activated per token.
 
     Key advantages over pure-MLA architecture:
     - 75% of layers have O(1) inference memory (fixed-size state, no KV cache)

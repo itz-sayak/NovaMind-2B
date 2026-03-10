@@ -17,9 +17,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from configs.model_config import NovaMind3BConfig
+from configs.model_config import NovaMind2BConfig
 from configs.train_config import SFTConfig
-from model.transformer import NovaMind3B
+from model.transformer import NovaMind2B
 from data.dataset import SFTDataset
 
 
@@ -39,7 +39,7 @@ def get_lr(step, total_steps, config):
 
 def train_sft(args):
     sft_config = SFTConfig()
-    model_config = NovaMind3BConfig()
+    model_config = NovaMind2BConfig()
     model_config.mtp_depth = 0  # No MTP during SFT
     # Apply context extension overrides from SFTConfig.
     model_config.max_seq_len = sft_config.max_seq_len
@@ -59,7 +59,7 @@ def train_sft(args):
     
     # Load model
     print("\nInitializing model...")
-    model = NovaMind3B(model_config)
+    model = NovaMind2B(model_config)
     
     # Load pretrained weights
     if args.pretrained:

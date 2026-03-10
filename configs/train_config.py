@@ -1,5 +1,5 @@
 """
-Training configuration for NovaMind-3B (2× NVIDIA L40S).
+Training configuration for NovaMind-2B (2× NVIDIA L40S).
 """
 from dataclasses import dataclass, field
 
@@ -43,7 +43,7 @@ class PretrainConfig:
     eval_interval: int = 500
     log_interval: int = 10
     save_interval: int = 5_000
-    output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/pretrain"
+    output_dir: str = "/mnt/zone/A/checkpoints/novamind-2b/pretrain"
     
     # Batch-size warmup (grad_accum ramps from initial -> full)
     # Both set to 1 → no warmup; ramp only applies when initial < target.
@@ -102,14 +102,14 @@ class SFTConfig:
     eval_interval: int = 200
     log_interval: int = 10
     save_interval: int = 500
-    output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/sft"
+    output_dir: str = "/mnt/zone/A/checkpoints/novamind-2b/sft"
     
     device: str = "cuda"
     dtype: str = "bfloat16"
     compile: bool = True
     gradient_checkpointing: bool = True
     
-    pretrained_ckpt: str = "/mnt/zone/A/checkpoints/novamind-3b/pretrain/latest.pt"
+    pretrained_ckpt: str = "/mnt/zone/A/checkpoints/novamind-2b/pretrain/latest.pt"
 
 
 @dataclass
@@ -137,14 +137,14 @@ class DPOConfig:
     eval_interval: int = 200
     log_interval: int = 10
     save_interval: int = 500
-    output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/dpo"
+    output_dir: str = "/mnt/zone/A/checkpoints/novamind-2b/dpo"
     
     device: str = "cuda"
     dtype: str = "bfloat16"
     compile: bool = True
     gradient_checkpointing: bool = True
     
-    sft_ckpt: str = "/mnt/zone/A/checkpoints/novamind-3b/sft/latest.pt"
+    sft_ckpt: str = "/mnt/zone/A/checkpoints/novamind-2b/sft/latest.pt"
 
 
 @dataclass
@@ -202,7 +202,7 @@ class LongContextConfig:
     eval_interval: int = 200
     log_interval: int = 10
     save_interval: int = 1_000
-    output_dir: str = "/mnt/zone/A/checkpoints/novamind-3b/longctx_64k"
+    output_dir: str = "/mnt/zone/A/checkpoints/novamind-2b/longctx_100k"
 
     # Batch-size warmup: no ramp (grad_accum=1 throughout)
     grad_accum_initial: int = 1

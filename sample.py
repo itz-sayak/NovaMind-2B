@@ -9,15 +9,15 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from configs.model_config import NovaMind3BConfig
-from model.transformer import NovaMind3B
+from configs.model_config import NovaMind2BConfig
+from model.transformer import NovaMind2B
 from tokenizer.tokenizer import get_tokenizer
 
 
 def load_model(checkpoint_path, device="cuda"):
-    config = NovaMind3BConfig()
+    config = NovaMind2BConfig()
     config.mtp_depth = 0
-    model = NovaMind3B(config)
+    model = NovaMind2B(config)
     
     if checkpoint_path and os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)

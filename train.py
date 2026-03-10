@@ -51,9 +51,9 @@ if _pre_args.no_fla or _pre_args.smoke_test:
     os.environ.setdefault("FLA_DISABLE", "1")
 del _pre, _pre_args
 
-from configs.model_config import NovaMind3BConfig
+from configs.model_config import NovaMind2BConfig
 from configs.train_config import PretrainConfig
-from model.transformer import NovaMind3B
+from model.transformer import NovaMind2B
 from model.gated_delta_net import warmup_fla_kernels
 from data.dataset import PretrainDataset, StreamingPretrainDataset
 from optim.muon import create_optimizer
@@ -223,7 +223,7 @@ def save_checkpoint(model, optimizer, step, config, loss, path, ema=None, total_
         "loss": loss,
         "total_tokens": total_tokens,
         "config": {
-            "model": vars(NovaMind3BConfig()),
+            "model": vars(NovaMind2BConfig()),
             "train": vars(config),
         },
     }
@@ -316,7 +316,7 @@ def train(args):
     main = is_main(rank)
 
     # Configuration
-    model_config = NovaMind3BConfig()
+    model_config = NovaMind2BConfig()
     train_config = PretrainConfig()
 
     # Override with command line args
@@ -382,13 +382,13 @@ def train(args):
 
     if main:
         print("=" * 60)
-        print(f"NovaMind-3B Pretraining  (world_size={world_size})")
+        print(f"NovaMind-2B Pretraining  (world_size={world_size})")
         print("=" * 60)
     
     # Model
     if main:
         print("\nInitializing model...")
-    model = NovaMind3B(model_config)
+    model = NovaMind2B(model_config)
     param_counts = model.count_parameters()
     if main:
         print(f"Total parameters: {param_counts['total']:,} ({param_counts['total']/1e9:.3f}B)")

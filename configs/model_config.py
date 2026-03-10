@@ -1,27 +1,25 @@
 """
-Hybrid 3B Reasoning Model Configuration.
+Hybrid 2B Reasoning Model Configuration.
 
 Architecture: GDN/MLA Hybrid + Dense SwiGLU FFN + RMSNorm + RoPE + MTP
   - 3:1 ratio of Gated DeltaNet (linear O(n)) to MLA (quadratic O(n²))
   - 20 GDN layers + 6 MLA layers = 26 total
-  - ~2.7B total parameters (all activated per token — no MoE)
+  - ~2.0B total parameters (all activated per token — no MoE)
 
 Target hardware: 2× NVIDIA L40S (2× 48 GB) via DDP
-  - VRAM budget per GPU: ~40 GB with activation checkpointing
-    (weights 5.4GB bf16 + grads 5.4GB + optimizer ~16GB + activations ~10GB)
-  - Fits in 48 GB per GPU
+  - VRAM budget per GPU: ~35 GB with activation checkpointing
 """
 from dataclasses import dataclass, field
 from typing import Optional, List
 
 
 @dataclass
-class NovaMind3BConfig:
+class NovaMind2BConfig:
     # --- Tokenizer ---
     vocab_size: int = 100352          # cl100k_base padded to multiple of 64
 
     # --- Transformer core ---
-    hidden_dim: int = 2560            # Sized for ~2.7B total params
+    hidden_dim: int = 2048            # Sized for ~2.0B total params
     num_layers: int = 26              # 20 GDN + 6 MLA = 26 total
     max_seq_len: int = 65536          # Native 64K training
     dropout: float = 0.0
@@ -43,14 +41,14 @@ class NovaMind3BConfig:
     gdn_conv_size: int = 4            # Conv kernel size
 
     # --- Multi-head Latent Attention (MLA) — for attention layers ---
-    n_heads: int = 20                 # d_head=128 (20×128=2560)
+    n_heads: int = 16                 # d_head=128 (16×128=2048)
     d_head: int = 128
-    d_kv_comp: int = 640              # hidden/4
-    d_q_comp: int = 1280              # hidden/2
+    d_kv_comp: int = 512              # hidden/4
+    d_q_comp: int = 1024              # hidden/2
     d_rope: int = 64                  # d_head/2
 
     # --- Feed-Forward Network (ALL layers dense) ---
-    dense_intermediate: int = 7040    # ≈2.75× hidden; SwiGLU ≈4× effective
+    dense_intermediate: int = 6208    # ≈3.03× hidden; SwiGLU ≈4× effective; tuned for 2B
     num_dense_layers: int = 26        # ALL layers are dense
 
     # --- MoE (DISABLED — all layers dense) ---
@@ -189,10 +187,10 @@ class NovaMind3BConfig:
 
 
 if __name__ == "__main__":
-    config = NovaMind3BConfig()
+    config = NovaMind2BConfig()
     counts = config.count_parameters()
     print("=" * 60)
-    print("NovaMind-3B Hybrid Parameter Count")
+    print("NovaMind-2B Hybrid Parameter Count")
     print(f"  Architecture: {config.num_layers - len(config.hybrid_attention_layers)} GDN + "
           f"{len(config.hybrid_attention_layers)} MLA layers (3:1 ratio)")
     print("=" * 60)
