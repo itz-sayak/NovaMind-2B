@@ -295,6 +295,26 @@ def init_wandb(args, model_config, train_config, world_size):
         },
         resume="allow",
     )
+    # Define metrics so WandB tracks summaries and axis alignment correctly.
+    # Without this, metrics logged at different intervals (train vs val) may
+    # not appear in the run summary or may be treated as separate series.
+    wandb.define_metric("*", step_metric="step")  # default x-axis for all metrics
+
+    # Train metrics — track the best (minimum) value in the run summary
+    for m in ("train/loss", "train/total_loss", "train/ppl",
+              "train/mtp_loss", "train/grad_norm"):
+        wandb.define_metric(m, summary="min", goal="minimize")
+
+    # Val metrics
+    for m in ("val/loss", "val/ppl", "val/best_loss"):
+        wandb.define_metric(m, summary="min", goal="minimize")
+
+    # Perf / optimizer — track last value
+    for m in ("perf/tok_per_sec", "perf/tokens_seen_B", "perf/step_time_ms",
+              "optimizer/lr", "optimizer/muon_lr", "optimizer/grad_accum",
+              "optimizer/grad_scaler_scale"):
+        wandb.define_metric(m, summary="last")
+
     print(f"  W&B run: {wandb.run.get_url()}")
     return True
 
