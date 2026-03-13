@@ -335,6 +335,8 @@ def init_wandb(args, model_config, train_config, world_size):
 def log_wandb(metrics: dict, step: int):
     """Safe wandb log — no-ops if wandb is not active."""
     if _wandb_available and wandb.run is not None:
+        metrics = metrics.copy()
+        metrics["step"] = step
         wandb.log(metrics, step=step)
 
 
