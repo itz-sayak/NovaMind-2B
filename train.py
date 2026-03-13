@@ -357,6 +357,8 @@ def train(args):
         train_config.gradient_accumulation_steps = args.grad_accum
     if args.max_steps:
         train_config.max_steps = args.max_steps
+    if args.log_interval:
+        train_config.log_interval = args.log_interval
     if args.seq_len:
         model_config.max_seq_len = args.seq_len
     if args.rope_base:
@@ -783,6 +785,7 @@ def train(args):
                 f"tok/s {tokens_per_sec:.0f} | "
                 f"ga {grad_accum} | "
                 f"tokens {tokens_processed/1e9:.2f}B"
+                , flush=True
             )
 
             if wandb_enabled:
@@ -860,6 +863,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--grad-accum", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--log-interval", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--no-mtp", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
