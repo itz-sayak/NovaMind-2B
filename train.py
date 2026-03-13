@@ -165,6 +165,8 @@ class EMA:
         self.decay = decay
         self.shadow = {}
         raw = model.module if isinstance(model, DDP) else model
+        if hasattr(raw, "_orig_mod"):
+            raw = raw._orig_mod
         for name, param in raw.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.float().cpu().clone()
@@ -172,6 +174,8 @@ class EMA:
     @torch.no_grad()
     def update(self, model):
         raw = model.module if isinstance(model, DDP) else model
+        if hasattr(raw, "_orig_mod"):
+            raw = raw._orig_mod
         for name, param in raw.named_parameters():
             if name in self.shadow:
                 self.shadow[name].mul_(self.decay).add_(
@@ -188,6 +192,8 @@ class EMA:
     def apply_to(self, model):
         """Copy EMA weights into model (e.g. for evaluation)."""
         raw = model.module if isinstance(model, DDP) else model
+        if hasattr(raw, "_orig_mod"):
+            raw = raw._orig_mod
         for name, param in raw.named_parameters():
             if name in self.shadow:
                 param.data.copy_(self.shadow[name].to(param.device, param.dtype))
@@ -216,6 +222,8 @@ def save_checkpoint(model, optimizer, step, config, loss, path, ema=None, total_
     """Save training checkpoint (call only from rank 0)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     raw_model = model.module if isinstance(model, DDP) else model
+    if hasattr(raw_model, "_orig_mod"):
+        raw_model = raw_model._orig_mod
     checkpoint = {
         "model": raw_model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -239,7 +247,10 @@ def save_checkpoint(model, optimizer, step, config, loss, path, ema=None, total_
 def load_checkpoint(path, model, optimizer=None, ema=None):
     """Load training checkpoint."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(checkpoint["model"])
+    raw_model = model.module if isinstance(model, DDP) else model
+    if hasattr(raw_model, "_orig_mod"):
+        raw_model = raw_model._orig_mod
+    raw_model.load_state_dict(checkpoint["model"])
     if optimizer is not None and "optimizer" in checkpoint:
         try:
             optimizer.load_state_dict(checkpoint["optimizer"])
