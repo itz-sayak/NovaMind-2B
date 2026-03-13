@@ -557,7 +557,8 @@ def train(args):
                 start_step = step_from_ckpt
                 total_tokens = saved_total_tokens
             if main:
-                print(f"Resumed at step {start_step}, total_tokens={total_tokens:,}")
+                print(f"Resumed from step {start_step}.")
+                print(f"The model was successfully trained up to {total_tokens:,} tokens before this checkpoint.")
             # If --resume-data was passed, rebuild dataloader with offset
             if getattr(args, 'resume_data', False) and saved_total_tokens > 0:
                 resume_seqs = saved_total_tokens // model_config.max_seq_len

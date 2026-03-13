@@ -11,11 +11,10 @@ class PretrainConfig:
     data_dir: str = "/mnt/zone/A/datasets/pretrain"
 
     # Training
-    # 2 GPUs × batch=1 × grad_accum=1 × seq=65536 = 131,072 tokens/step
-    # 1.5M steps × 131K ≈ 196B tokens  (Chinchilla-optimal for 3B is ~60B;
-    # ~3× Chinchilla intentionally overtrains for inference efficiency)
+    # 2 GPUs × batch=1 × grad_accum=4 × seq=65536 = 524,288 tokens/step
+    # 1.5M steps × 524K ≈ 786B tokens
     batch_size: int = 1             # micro batch per GPU (tight at 65K, needs all VRAM)
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 4
     max_steps: int = 1_500_000
     warmup_steps: int = 2000
     
