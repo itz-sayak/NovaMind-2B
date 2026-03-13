@@ -268,8 +268,10 @@ def load_checkpoint(path, model, optimizer=None, ema=None):
 def init_wandb(args, model_config, train_config, world_size):
     """Initialise Weights & Biases run on rank 0 only."""
     if not _wandb_available:
-        print("Warning: wandb not installed. Skipping W&B logging.")
-        return False
+        raise RuntimeError(
+            "--wandb was requested, but the 'wandb' package is not installed in this environment.\n"
+            "Install it in the same env used by torchrun: pip install wandb"
+        )
     wandb.init(
         project=args.wandb_project,
         name=args.wandb_run_name,
@@ -314,11 +316,11 @@ def init_wandb(args, model_config, train_config, world_size):
     # Train metrics — track the best (minimum) value in the run summary
     for m in ("train/loss", "train/total_loss", "train/ppl",
               "train/mtp_loss", "train/grad_norm"):
-        wandb.define_metric(m, summary="min", goal="minimize")
+        wandb.define_metric(m, summary="min")
 
     # Val metrics
     for m in ("val/loss", "val/ppl", "val/best_loss"):
-        wandb.define_metric(m, summary="min", goal="minimize")
+        wandb.define_metric(m, summary="min")
 
     # Perf / optimizer — track last value
     for m in ("perf/tok_per_sec", "perf/tokens_seen_B", "perf/step_time_ms",
@@ -326,7 +328,7 @@ def init_wandb(args, model_config, train_config, world_size):
               "optimizer/grad_scaler_scale"):
         wandb.define_metric(m, summary="last")
 
-    print(f"  W&B run: {wandb.run.get_url()}")
+    print(f"  W&B run: {wandb.run.url}")
     return True
 
 
